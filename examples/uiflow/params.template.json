@@ -1,0 +1,11 @@
+{
+  "_note": "Copy this file and map each activity's short name to the arguments that enter it. extras -> --es, int_extras -> --ei, bool_extras -> --ez, raw_args -> appended verbatim (e.g. -d <uri>). pre_state documents the data a page needs; the probe cannot synthesise it, so a page that needs data it does not get will be reported as `finished`, not `reached`.",
+  "SomeActivity": {
+    "extras": { "<extraKey>": "<value>" },
+    "pre_state": "<what data/state this page needs>"
+  },
+  "AnotherActivity": {
+    "int_extras": { "<intKey>": 1 },
+    "raw_args": ["-d", "<uri>"]
+  }
+}

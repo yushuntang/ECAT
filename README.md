@@ -409,6 +409,9 @@ generator:
 | `ecat status` | Current entropy and iteration count |
 | `ecat diff <N>` | Entropy breakdown, gradient and diff for iteration N |
 | `ecat report` | Generate a markdown report plus charts |
+| `ecat uiflow inventory` | Layer A: parameterised `am start` over every manifest activity → reachability table |
+| `ecat uiflow walk` | Layer B/C: click-only walk → pages + edges (the FN denominator) |
+| `ecat uiflow diff` | Acceptance: `diff(B, C)` → FN rate, both directions (`docs/ui-flow.md`) |
 
 Common examples for each subcommand follow.
 

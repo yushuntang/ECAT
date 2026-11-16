@@ -499,6 +499,185 @@ def report() -> None:
     console.print(f"[green]Report written to {out}[/green]")
 
 
+# ── uiflow ────────────────────────────────────────────────────────────────────
+
+uiflow_app = typer.Typer(
+    help="UI flow coverage: A 直跳清单 / B 点击遍历 / diff 算 FN 率",
+    no_args_is_help=True,
+)
+app.add_typer(uiflow_app, name="uiflow")
+
+
+@uiflow_app.command("inventory")
+def uiflow_inventory(
+    apk: Annotated[Path, typer.Option("--apk", help="Patched APK whose manifest is the page source")],
+    serial: Annotated[str, typer.Option("--serial", help="adb serial")] = "emulator-5630",
+    params: Annotated[Path | None, typer.Option("--params", help="page entry params JSON")] = None,
+    out: Annotated[Path, typer.Option("--out", help="output graph JSON (a .md sits next to it)")] = Path(
+        "reports/ui-flow/table-A.json"
+    ),
+    settle: Annotated[float, typer.Option("--settle", help="seconds before the reach assertion")] = 3.0,
+    only: Annotated[str, typer.Option("--only", help="comma-separated simple activity names")] = "",
+    trampolines: Annotated[str, typer.Option("--trampolines", help="hand-off activities")] = "SplashActivity",
+    batch_size: Annotated[int, typer.Option("--batch-size", help="pages per batch before a breather")] = 8,
+) -> None:
+    """Layer A — 每个 manifest activity 一条参数化 am start，落地断言后出清单。"""
+    import json as _json
+
+    from ecat.uiflow.device import Adb, AdbError
+    from ecat.uiflow.inventory import inventory
+    from ecat.uiflow.report import inventory_markdown
+
+    if not apk.exists():
+        console.print(f"[red]APK not found: {apk}[/red]")
+        raise typer.Exit(1)
+    entry_params = _json.loads(params.read_text(encoding="utf-8")) if params else {}
+    adb = Adb(serial)
+    try:
+        graph = inventory(
+            apk,
+            adb,
+            params=entry_params,
+            settle=settle,
+            trampolines={x.strip() for x in trampolines.split(",") if x.strip()},
+            only={x.strip() for x in only.split(",") if x.strip()} or None,
+            batch_size=batch_size,
+            log=lambda m: console.print(m, markup=False, highlight=False),
+        )
+    except (AdbError, RuntimeError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    path = graph.save(out)
+    path.with_suffix(".md").write_text(inventory_markdown(graph, settle=settle), encoding="utf-8")
+
+    table = Table(title=f"Layer A — {graph.summary()['countable']}/{len(graph.pages)} 页可直跳")
+    table.add_column("page")
+    table.add_column("verdict")
+    table.add_column("detail")
+    for page in graph.pages:
+        style = "green" if page.countable else "yellow"
+        table.add_row(page.label, f"[{style}]{page.verdict}[/{style}]", page.detail[:52])
+    console.print(table)
+    console.print(f"[green]A graph -> {path}[/green] (+ .md)")
+
+
+@uiflow_app.command("walk")
+def uiflow_walk(
+    flows: Annotated[Path, typer.Option("--flows", help="click flows JSON")],
+    package: Annotated[str, typer.Option("--package", help="package (Android) / bundle (OpenHarmony)")] = "",
+    driver: Annotated[str, typer.Option("--driver", help="adb (Android) or hdc (OpenHarmony)")] = "adb",
+    serial: Annotated[str, typer.Option("--serial", help="adb serial")] = "emulator-5630",
+    target: Annotated[str, typer.Option("--target", help="hdc target (default: first from `hdc list targets`)")] = "",
+    ability: Annotated[str, typer.Option("--ability", help="OH UIAbility to launch for step {launch}")] = "EntryAbility",
+    out: Annotated[Path, typer.Option("--out", help="output graph JSON")] = Path("reports/ui-flow/table-B.json"),
+    settle: Annotated[float, typer.Option("--settle", help="seconds after each action")] = 1.5,
+    reset_between: Annotated[bool, typer.Option("--reset/--no-reset", help="force-stop between flows")] = True,
+    edges_from_logcat: Annotated[bool, typer.Option("--edges-from-logcat", help="also mine ActivityTaskManager START")] = False,
+    dismiss_labels: Annotated[str, typer.Option("--dismiss-labels", help="comma-separated dialog buttons to tap through")] = "",
+) -> None:
+    """Layer B/C — 只用点击走一遍，记录到达的页面与跳转边。"""
+    import json as _json
+
+    from ecat.uiflow.device import Adb, DeviceError
+    from ecat.uiflow.report import walk_markdown
+    from ecat.uiflow.walk import load_flows, run_flows
+
+    if not flows.exists():
+        console.print(f"[red]flows not found: {flows}[/red]")
+        raise typer.Exit(1)
+    file_pkg, flow_list = load_flows(flows)
+    raw = _json.loads(flows.read_text(encoding="utf-8"))
+    meta = raw if isinstance(raw, dict) else {}
+    labels = tuple(dismiss_labels.split(",")) if dismiss_labels else tuple(meta.get("dismiss_labels") or ())
+    labels = tuple(x.strip() for x in labels if str(x).strip()) or None
+    pkg = package or file_pkg
+    if not pkg:
+        console.print("[red]no package: pass --package or put \"package\" in the flows file[/red]")
+        raise typer.Exit(1)
+
+    launcher: str | None = None
+    if driver == "hdc":
+        from ecat.uiflow.hdc import Hdc, HdcError
+
+        try:
+            device = Hdc(target or None)
+        except HdcError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
+        launcher = f"{pkg}:entry:{ability}"
+        side = "oh"
+    else:
+        device = Adb(serial)
+        side = "android"
+
+    try:
+        graph, results = run_flows(
+            device,
+            pkg,
+            flow_list,
+            settle=settle,
+            reset_between=reset_between,
+            edges_from_logcat=edges_from_logcat,
+            launcher=launcher,
+            side=side,
+            dismiss_labels=labels,
+            log=lambda m: console.print(m, markup=False, highlight=False),
+        )
+    except DeviceError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    path = graph.save(out)
+    path.with_suffix(".md").write_text(walk_markdown(graph, results), encoding="utf-8")
+    for res in results:
+        mark = "[green]ok[/green]" if res.ok else f"[red]{len(res.failures)} failed[/red]"
+        console.print(f"  flow {res.id}: {mark} pages={len(res.pages_seen)}")
+    console.print(
+        f"[green]B graph -> {path}[/green] (+ .md) · pages={len(graph.countable())} edges={len(graph.edges)}"
+    )
+    if any(not r.ok for r in results):
+        raise typer.Exit(1)
+
+
+@uiflow_app.command("diff")
+def uiflow_diff(
+    base: Annotated[Path, typer.Option("--base", help="Layer B graph (denominator)")],
+    port: Annotated[Path, typer.Option("--port", help="Layer C graph (numerator)")],
+    mapping: Annotated[Path | None, typer.Option("--mapping", help="base->port page mapping JSON")] = None,
+    out: Annotated[Path, typer.Option("--out", help="output diff JSON")] = Path("reports/ui-flow/diff.json"),
+    force: Annotated[bool, typer.Option("--force", help="allow an amstart graph as denominator")] = False,
+) -> None:
+    """验收 — diff(B, C)，算 FN 率（A 不能当分母）。"""
+    import json as _json
+
+    from ecat.uiflow.diff import diff_graphs
+    from ecat.uiflow.models import PageGraph
+
+    for p in (base, port):
+        if not p.exists():
+            console.print(f"[red]graph not found: {p}[/red]")
+            raise typer.Exit(1)
+    mapping_data = _json.loads(mapping.read_text(encoding="utf-8")) if mapping else None
+    try:
+        result = diff_graphs(PageGraph.load(base), PageGraph.load(port), mapping=mapping_data, force=force)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    path = result.save(out)
+    console.print(
+        f"B={result.base_count} C={result.port_count} matched={len(result.matched)} "
+        f"missing={len(result.missing)} extra={len(result.extra)} "
+        f"[bold]FN={result.fn_rate:.1%}[/bold]"
+    )
+    for item in result.missing:
+        console.print(f"  [red]missing[/red] {item['label']}")
+    for item in result.extra:
+        console.print(f"  [yellow]extra[/yellow]   {item['label']}")
+    console.print(f"[green]diff -> {path}[/green] (+ .md)")
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
