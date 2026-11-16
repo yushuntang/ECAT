@@ -640,6 +640,76 @@ def uiflow_walk(
         raise typer.Exit(1)
 
 
+@uiflow_app.command("discover")
+def uiflow_discover(
+    apk: Annotated[Path | None, typer.Option("--apk", help="original APK to explore (not the patched one)")] = None,
+    serial: Annotated[str, typer.Option("--serial", help="adb serial")] = "emulator-5630",
+    out: Annotated[Path, typer.Option("--out", help="output graph JSON (a .md sits next to it)")] = Path(
+        "reports/ui-flow/table-B.json"
+    ),
+    home: Annotated[str, typer.Option("--droidbot-home", help="DroidBot checkout (or ECAT_DROIDBOT_HOME)")] = "",
+    python: Annotated[str, typer.Option("--droidbot-python", help="interpreter with DroidBot deps")] = "",
+    policy: Annotated[str, typer.Option("--policy", help="droidbot exploration policy")] = "bfs_greedy",
+    count: Annotated[int, typer.Option("--count", help="max events")] = 30,
+    timeout: Annotated[int, typer.Option("--timeout", help="exploration seconds")] = 300,
+    tries: Annotated[int, typer.Option("--tries", help="retries on transient adb failures")] = 3,
+    include_external: Annotated[bool, typer.Option("--include-external", help="keep other apps' screens")] = False,
+    from_utg: Annotated[Path | None, typer.Option("--from-utg", help="import an existing utg.js instead of running")] = None,
+) -> None:
+    """Layer B（发现）— 用 DroidBot 自动遍历出页面集合与跳转边（无需手写流程）。"""
+    import json as _json
+
+    from ecat.uiflow.discover import (
+        DroidBotError,
+        graph_from_utg,
+        parse_utg,
+        run_droidbot,
+        summary_line,
+    )
+    from ecat.uiflow.report import discover_markdown
+
+    try:
+        if from_utg is not None:
+            framework = parse_utg(from_utg)
+            graph = graph_from_utg(framework, include_external=include_external)
+            out_dir = str(from_utg.parent)
+            console.print(f"[yellow]imported existing UTG {from_utg}[/yellow]")
+        else:
+            if apk is None or not apk.exists():
+                console.print(f"[red]APK not found: {apk} (or pass --from-utg)[/red]")
+                raise typer.Exit(1)
+            run = run_droidbot(
+                apk,
+                serial,
+                out.parent / "droidbot-run",
+                home=home or None,
+                python=python or None,
+                policy=policy,
+                count=count,
+                timeout=timeout,
+                tries=tries,
+                log=lambda m: console.print(m, markup=False, highlight=False),
+            )
+            graph = graph_from_utg(run.framework, include_external=include_external)
+            framework, out_dir = run.framework, str(run.out_dir)
+            console.print(summary_line(run))
+    except DroidBotError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    path = graph.save(out)
+    path.with_suffix(".md").write_text(discover_markdown(graph, framework, out_dir), encoding="utf-8")
+    path.with_suffix(".utg.json").write_text(
+        _json.dumps(framework, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    for page in graph.pages:
+        console.print(f"  {page.label:32s} {page.component.rsplit('/', 1)[-1]}")
+    console.print(
+        f"[green]discover -> {path}[/green] (+ .md, + .utg.json) · "
+        f"pages={len(graph.countable())} edges={len(graph.edges)}"
+    )
+
+
 @uiflow_app.command("diff")
 def uiflow_diff(
     base: Annotated[Path, typer.Option("--base", help="Layer B graph (denominator)")],

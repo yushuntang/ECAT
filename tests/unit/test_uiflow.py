@@ -155,3 +155,67 @@ def test_load_flows_both_shapes(tmp_path) -> None:
     bare.write_text(json.dumps([{"id": "f2", "steps": []}]), encoding="utf-8")
     pkg2, flows2 = load_flows(bare)
     assert pkg2 is None and flows2[0]["id"] == "f2"
+
+
+# ── discovery (DroidBot) ──────────────────────────────────────────────────────
+def _utg_framework() -> dict:
+    return {
+        "app_package": "pkg",
+        "app_main_activity": ".Main",
+        "device_serial": "emulator-1",
+        "test_date": "2026-01-01 00:00:00",
+        "time_spent": 12.0,
+        "num_nodes": 3,
+        "num_edges": 2,
+        "num_reached_activities": 2,
+        "nodes": [
+            {"id": "n1", "label": "Main", "package": "pkg", "activity": ".Main",
+             "structure_str": "aaaa1111", "image": "states/a.png"},
+            {"id": "n2", "label": "Detail", "package": "pkg", "activity": ".Detail",
+             "structure_str": "bbbb2222", "image": "states/b.png"},
+            {"id": "n3", "label": "Launcher", "package": "com.other", "activity": ".Home",
+             "structure_str": "cccc3333", "image": "states/c.png"},
+        ],
+        "edges": [
+            {"from": "n1", "to": "n2",
+             "events": [{"event_type": "touch", "event_str": "TouchEvent(view=Button)"}]},
+            {"from": "n3", "to": "n1",
+             "events": [{"event_type": "intent", "event_str": "IntentEvent(am start)"}]},
+        ],
+    }
+
+
+def test_parse_utg_strips_js_assignment(tmp_path) -> None:
+    from ecat.uiflow.discover import parse_utg
+
+    f = tmp_path / "utg.js"
+    f.write_text("var utg =\n" + json.dumps(_utg_framework()), encoding="utf-8")
+    fw = parse_utg(f)
+    assert fw["app_package"] == "pkg"
+    assert len(fw["nodes"]) == 3
+
+
+def test_graph_from_utg_drops_other_apps() -> None:
+    from ecat.uiflow.discover import graph_from_utg
+
+    g = graph_from_utg(_utg_framework())
+    assert g.engine == "droidbot"
+    assert g.method == "click"
+    assert [p.component for p in g.pages] == ["pkg/.Main", "pkg/.Detail"], "other apps dropped"
+    assert len(g.edges) == 1 and g.edges[0].src == "n1"
+    assert "Main" in g.pages[0].label
+
+
+def test_graph_from_utg_can_keep_external() -> None:
+    from ecat.uiflow.discover import graph_from_utg
+
+    g = graph_from_utg(_utg_framework(), include_external=True)
+    assert len(g.pages) == 3
+    assert any(p.extra.get("external") for p in g.pages)
+
+
+def test_find_checkout_explains_the_pypi_trap(tmp_path) -> None:
+    from ecat.uiflow.discover import DroidBotError, find_checkout
+
+    with pytest.raises(DroidBotError, match="start.py|checkout"):
+        find_checkout(tmp_path / "not-a-checkout")

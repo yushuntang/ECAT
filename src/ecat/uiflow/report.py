@@ -46,6 +46,37 @@ def inventory_markdown(graph: PageGraph, *, settle: float = 3.0) -> str:
     return "\n".join(lines) + "\n"
 
 
+def discover_markdown(graph: PageGraph, framework: dict[str, Any], out_dir: str) -> str:
+    """Layer B/D — pages found by an exploration engine (no hand-written flows)."""
+    lines = [
+        "# Layer B（发现）— 自动遍历出来的页面集合",
+        "",
+        f"- 目标 `{graph.target}` · 设备 `{graph.device}` · engine `{graph.engine}`",
+        f"- 产物 `{out_dir}` · 框架统计：{framework.get('num_nodes')} 状态 / "
+        f"{framework.get('num_edges')} 边 / 触达 {framework.get('num_reached_activities')} 个页面组件 / "
+        f"{float(framework.get('time_spent') or 0):.0f}s",
+        f"- 本图收录 App 内页面 **{len(graph.countable())}** · 跳转边 **{len(graph.edges)}**",
+        "",
+        "> 自动遍历只回答“有哪些页面存在”。它的探索带有启发式，页面集合会随轮次浮动，",
+        "> 所以 FN 率的分母仍以可复现的点击流程（walk）为准。",
+        "",
+        "## 页面",
+        "",
+        "| page | 组件 |",
+        "|---|---|",
+    ]
+    for page in graph.pages:
+        lines.append(f"| `{page.label}` | `{short(page.component)}` |")
+    if graph.edges:
+        lines += ["", "## 跳转边", "", "| from | action | to |", "|---|---|---|"]
+        by_key = {p.key: p for p in graph.pages}
+        for e in graph.edges:
+            src = by_key[e.src].label if e.src in by_key else e.src[:12]
+            dst = by_key[e.dst].label if e.dst in by_key else e.dst[:12]
+            lines.append(f"| `{src}` | {e.action} | `{dst}` |")
+    return "\n".join(lines) + "\n"
+
+
 def walk_markdown(graph: PageGraph, results: list[Any]) -> str:
     ok = sum(1 for r in results if r.ok)
     failures = [f for r in results for f in r.failures]

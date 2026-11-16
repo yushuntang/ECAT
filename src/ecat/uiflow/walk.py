@@ -149,6 +149,7 @@ def run_flows(
     """Execute click flows; returns (graph, per-flow results)."""
     graph = PageGraph(side=side, method="click", target=package,
                       device=adb.serial, generated=time.strftime("%Y-%m-%d %H:%M:%S"))
+    adb.wake()  # a sleeping/locked screen would be "measured" as a page of the app
     launcher = launcher or resolve_launcher(adb, package)
     results: list[FlowResult] = []
 

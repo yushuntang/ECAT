@@ -48,6 +48,8 @@ class DiffResult:
     port_method: str
     base_count: int
     port_count: int
+    base_engine: str = ""
+    port_engine: str = ""
     matched: list[dict[str, str]] = field(default_factory=list)
     missing: list[dict[str, str]] = field(default_factory=list)
     extra: list[dict[str, str]] = field(default_factory=list)
@@ -84,8 +86,12 @@ class DiffResult:
         lines = [
             "# UI flow parity — B vs C（FN 率）",
             "",
-            f"- 分母 B：`{self.base_side}`（method=`{self.base_method}`）可点击到达 **{self.base_count}** 页",
-            f"- 分子 C：`{self.port_side}`（method=`{self.port_method}`）可点击到达 **{self.port_count}** 页",
+            f"- 分母 B：`{self.base_side}`（method=`{self.base_method}`"
+            + (f" · engine=`{self.base_engine}`" if self.base_engine else "")
+            + f"）可点击到达 **{self.base_count}** 页",
+            f"- 分子 C：`{self.port_side}`（method=`{self.port_method}`"
+            + (f" · engine=`{self.port_engine}`" if self.port_engine else "")
+            + f"）可点击到达 **{self.port_count}** 页",
             f"- 匹配 **{len(self.matched)}** · 缺失 **{len(self.missing)}** · 多出 **{len(self.extra)}**",
             f"- **FN 率 = {len(self.missing)}/{self.base_count} = {self.fn_rate:.1%}** · 覆盖率 {self.coverage:.1%}",
             f"- 匹配方式：`{self.mapping_source}`",
@@ -146,6 +152,8 @@ def diff_graphs(
         port_side=port.side,
         base_method=base.method,
         port_method=port.method,
+        base_engine=base.engine,
+        port_engine=port.engine,
         base_count=len(base_pages),
         port_count=len(port_pages),
         mapping_source="mapping file" if mapping else "component/label normalisation",

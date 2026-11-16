@@ -147,6 +147,8 @@ class PageGraph:
     target: str = ""
     device: str = ""
     generated: str = ""
+    #: how the graph was produced: "" (walk), "droidbot", ... — kept for the report
+    engine: str = ""
     pages: list[Page] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
 
@@ -196,6 +198,7 @@ class PageGraph:
             "target": self.target,
             "device": self.device,
             "generated": self.generated or time.strftime("%Y-%m-%d %H:%M:%S"),
+            "engine": self.engine,
             "summary": self.summary(),
             "pages": [p.to_dict() for p in self.pages],
             "edges": [e.to_dict() for e in self.edges],
@@ -218,6 +221,7 @@ class PageGraph:
             target=d.get("target", ""),
             device=d.get("device", ""),
             generated=d.get("generated", ""),
+            engine=d.get("engine", ""),
             pages=[Page.from_dict(p) for p in d.get("pages", [])],
             edges=[Edge.from_dict(e) for e in d.get("edges", [])],
         )

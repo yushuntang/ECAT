@@ -30,6 +30,17 @@ from ecat.uiflow.device import DeviceError
 
 TRANSIENT = ("offline", "connect", "timeout", "Failure", "not found", "closed")
 
+#: lock-screen markers: none of these belong to an app under test
+LOCK_MARKERS = (
+    "ScreenLockRootComponent",
+    "Double-tap to activate",
+    "Enter your password",
+    "Enter PIN",
+    "Enter the PIN",
+    "Slide to unlock",
+    "Draw pattern",
+)
+
 #: OH system chrome pollutes the label set; mirrors tools/ui_runner.py
 SYS_PREFIX = ("StatusBar", "NavBar", "SCBDesktop", "SwiperPage", "FormItem", "PluginRoot")
 _JUNK = re.compile(r"^[\s\d,:.%/-]*$")
@@ -132,7 +143,32 @@ class Hdc:
 
     # ── control ───────────────────────────────────────────────────────────────
     def wake(self) -> None:
-        self.shell("uitest", "uiInput", "keyEvent", "WakeUp", check=False)
+        """Wake and unlock, or fail loudly.
+
+        `uitest keyEvent WakeUp` alone leaves the lock screen up on HarmonyOS hardware;
+        `power-shell wakeup` actually lights the panel. If a lock screen is still there
+        afterwards (PIN / pattern), stop with a clear message — silently continuing
+        "measures" the clock face as if it were a page of the app.
+        """
+        self.shell("power-shell", "wakeup", check=False)
+        time.sleep(0.8)
+        if not self._locked():
+            return
+        self.shell("uitest", "uiInput", "swipe", "640", "2400", "640", "700", "400", check=False)
+        time.sleep(1.2)
+        if self._locked():
+            raise HdcError(
+                "OpenHarmony device is locked (PIN/pattern/password). Unlock it on the device "
+                "and run again — a walk on a lock screen would record the clock as a page."
+            )
+
+    def _locked(self) -> bool:
+        try:
+            root = self.dump_root()
+        except HdcError:
+            return False
+        labels = {(node.get("text") or node.get("content-desc") or "").strip() for node in root.iter("node")}
+        return any(marker in label for label in labels for marker in LOCK_MARKERS)
 
     def force_stop(self, package: str) -> None:
         self.shell("aa", "force-stop", package, check=False)

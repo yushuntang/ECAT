@@ -78,6 +78,41 @@ What the walk records:
   never enters the denominator. Which buttons to tap through comes from
   `--dismiss-labels` or the flows file's `dismiss_labels`.
 
+## 2b. Layer B（发现）— exploration, for the pages nobody wrote a flow for
+
+Hand-written flows only cover what their author knew about. `discover` runs an
+exploration engine (DroidBot) to find the rest, and converts its UI transition graph
+into the same `PageGraph` the diff consumes:
+
+    ecat uiflow discover \
+        --apk <original.apk> \
+        --droidbot-home <droidbot-checkout> \
+        --droidbot-python <python-with-droidbot-deps> \
+        --count 25 --timeout 300 \
+        --out reports/ui-flow/table-B-discovered.json
+
+    # import a graph from a previous run instead of exploring again
+    ecat uiflow discover --from-utg <run-dir>/utg.js --out reports/ui-flow/table-B-discovered.json
+
+The graph is tagged `engine=droidbot`; screens belonging to other apps are dropped
+unless `--include-external` is passed.
+
+Three DroidBot traps are handled rather than documented away:
+
+* a PyPI install cannot run (`droidbot/__init__.py` does `import start`) — the command
+  insists on a checkout and runs `start.py` with the checkout as cwd;
+* setuptools >= 81 dropped `pkg_resources`, which DroidBot imports — detected up front
+  with the exact fix printed instead of a traceback mid-run;
+* DroidBot's own accessibility bootstrap loops forever on newer Android — the secure
+  setting is written here and then verified through `dumpsys activity services`.
+
+It also pre-flights the device and retries the whole exploration on transient adb
+failures, because DroidBot dies on a single `getprop` blip
+(`AttributeError: 'NoneType' object has no attribute 'tear_down'`).
+
+Discovery is heuristic: two runs can explore different states. Use it to find pages,
+not as the FN denominator — keep the click walk as B when you need a stable number.
+
 ## 3. Layer C and the diff
 
 Same flow file, executed against the ported app:
