@@ -410,8 +410,8 @@ generator:
 | `ecat diff <N>` | Entropy breakdown, gradient and diff for iteration N |
 | `ecat report` | Generate a markdown report plus charts |
 | `ecat uiflow inventory` | Layer A: parameterised `am start` over every manifest activity → reachability table |
-| `ecat uiflow walk` | Layer B/C: click-only walk → pages + edges (the FN denominator) |
-| `ecat uiflow discover` | Layer B discovery: DroidBot exploration → pages + edges for the flows nobody wrote |
+| `ecat uiflow discover` | Layer B: DroidBot exploration → the page set a user can reach |
+| `ecat uiflow import-gate` | Layer C: import the functional-gate report as the port's page set |
 | `ecat uiflow diff` | Acceptance: `diff(B, C)` → FN rate, both directions (`docs/ui-flow.md`) |
 
 Common examples for each subcommand follow.

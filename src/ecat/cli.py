@@ -562,84 +562,6 @@ def uiflow_inventory(
     console.print(f"[green]A graph -> {path}[/green] (+ .md)")
 
 
-@uiflow_app.command("walk")
-def uiflow_walk(
-    flows: Annotated[Path, typer.Option("--flows", help="click flows JSON")],
-    package: Annotated[str, typer.Option("--package", help="package (Android) / bundle (OpenHarmony)")] = "",
-    driver: Annotated[str, typer.Option("--driver", help="adb (Android) or hdc (OpenHarmony)")] = "adb",
-    serial: Annotated[str, typer.Option("--serial", help="adb serial")] = "emulator-5630",
-    target: Annotated[str, typer.Option("--target", help="hdc target (default: first from `hdc list targets`)")] = "",
-    ability: Annotated[str, typer.Option("--ability", help="OH UIAbility to launch for step {launch}")] = "EntryAbility",
-    out: Annotated[Path, typer.Option("--out", help="output graph JSON")] = Path("reports/ui-flow/table-B.json"),
-    settle: Annotated[float, typer.Option("--settle", help="seconds after each action")] = 1.5,
-    reset_between: Annotated[bool, typer.Option("--reset/--no-reset", help="force-stop between flows")] = True,
-    edges_from_logcat: Annotated[bool, typer.Option("--edges-from-logcat", help="also mine ActivityTaskManager START")] = False,
-    dismiss_labels: Annotated[str, typer.Option("--dismiss-labels", help="comma-separated dialog buttons to tap through")] = "",
-) -> None:
-    """Layer B/C — 只用点击走一遍，记录到达的页面与跳转边。"""
-    import json as _json
-
-    from ecat.uiflow.device import Adb, DeviceError
-    from ecat.uiflow.report import walk_markdown
-    from ecat.uiflow.walk import load_flows, run_flows
-
-    if not flows.exists():
-        console.print(f"[red]flows not found: {flows}[/red]")
-        raise typer.Exit(1)
-    file_pkg, flow_list = load_flows(flows)
-    raw = _json.loads(flows.read_text(encoding="utf-8"))
-    meta = raw if isinstance(raw, dict) else {}
-    labels = tuple(dismiss_labels.split(",")) if dismiss_labels else tuple(meta.get("dismiss_labels") or ())
-    labels = tuple(x.strip() for x in labels if str(x).strip()) or None
-    pkg = package or file_pkg
-    if not pkg:
-        console.print("[red]no package: pass --package or put \"package\" in the flows file[/red]")
-        raise typer.Exit(1)
-
-    launcher: str | None = None
-    if driver == "hdc":
-        from ecat.uiflow.hdc import Hdc, HdcError
-
-        try:
-            device = Hdc(target or None)
-        except HdcError as exc:
-            console.print(f"[red]{exc}[/red]")
-            raise typer.Exit(1) from exc
-        launcher = f"{pkg}:entry:{ability}"
-        side = "oh"
-    else:
-        device = Adb(serial)
-        side = "android"
-
-    try:
-        graph, results = run_flows(
-            device,
-            pkg,
-            flow_list,
-            settle=settle,
-            reset_between=reset_between,
-            edges_from_logcat=edges_from_logcat,
-            launcher=launcher,
-            side=side,
-            dismiss_labels=labels,
-            log=lambda m: console.print(m, markup=False, highlight=False),
-        )
-    except DeviceError as exc:
-        console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(1) from exc
-
-    path = graph.save(out)
-    path.with_suffix(".md").write_text(walk_markdown(graph, results), encoding="utf-8")
-    for res in results:
-        mark = "[green]ok[/green]" if res.ok else f"[red]{len(res.failures)} failed[/red]"
-        console.print(f"  flow {res.id}: {mark} pages={len(res.pages_seen)}")
-    console.print(
-        f"[green]B graph -> {path}[/green] (+ .md) · pages={len(graph.countable())} edges={len(graph.edges)}"
-    )
-    if any(not r.ok for r in results):
-        raise typer.Exit(1)
-
-
 @uiflow_app.command("discover")
 def uiflow_discover(
     apk: Annotated[Path | None, typer.Option("--apk", help="original APK to explore (not the patched one)")] = None,
@@ -707,6 +629,40 @@ def uiflow_discover(
     console.print(
         f"[green]discover -> {path}[/green] (+ .md, + .utg.json) · "
         f"pages={len(graph.countable())} edges={len(graph.edges)}"
+    )
+
+
+@uiflow_app.command("import-gate")
+def uiflow_import_gate(
+    report: Annotated[Path, typer.Option("--from", help="functional-gate report (gate.json)")],
+    out: Annotated[Path, typer.Option("--out", help="output graph JSON")] = Path("reports/ui-flow/table-C.json"),
+    bundle: Annotated[str, typer.Option("--bundle", help="port bundle name (label only)")] = "",
+    device: Annotated[str, typer.Option("--device", help="device that produced the report")] = "",
+    only_pass: Annotated[bool, typer.Option("--only-pass", help="count only screens the gate passed")] = False,
+) -> None:
+    """Layer C — 直接吃现有 functional gate 的报告，不另起一套流程/截图逻辑。"""
+    from ecat.uiflow.gate import (
+        GateReportError,
+        gate_summary,
+        graph_from_gate_report,
+        load_gate_report,
+    )
+
+    if not report.exists():
+        console.print(f"[red]gate report not found: {report}[/red]")
+        raise typer.Exit(1)
+    try:
+        payload = load_gate_report(report)
+    except (GateReportError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    graph = graph_from_gate_report(payload, bundle=bundle, device=device, only_pass=only_pass)
+    path = graph.save(out)
+    console.print(gate_summary(payload))
+    console.print(
+        f"[green]C graph -> {path}[/green] · pages={len(graph.countable())}"
+        + ("  [yellow](only-pass)[/yellow]" if only_pass else "")
     )
 
 

@@ -9,7 +9,6 @@ import pytest
 
 from ecat.uiflow.diff import diff_graphs
 from ecat.uiflow.models import COUNTABLE_VERDICTS, Edge, Page, PageGraph, fingerprint, norm, short
-from ecat.uiflow.walk import load_flows
 
 HERE = __import__("pathlib").Path(__file__).parent
 
@@ -141,20 +140,44 @@ def test_diff_report_notes_denominator_rule() -> None:
     assert "Search" not in md
 
 
-# ── flows ─────────────────────────────────────────────────────────────────────
-def test_load_flows_both_shapes(tmp_path) -> None:
-    wrapped = tmp_path / "a.json"
-    wrapped.write_text(
-        json.dumps({"package": "pkg", "flows": [{"id": "f1", "steps": [{"launch": True}]}]}),
-        encoding="utf-8",
-    )
-    pkg, flows = load_flows(wrapped)
-    assert pkg == "pkg" and flows[0]["id"] == "f1"
+# ── functional gate import ───────────────────────────────────────────────────
+def _gate_payload() -> dict:
+    return {
+        "rubric": {"weights": {}, "floors": {}},
+        "summary": {"screens": 2, "pass": 1, "suspect": 0, "fail": 1},
+        "screens": [
+            {"screen": "Home", "verdict": "pass", "score": 0.93, "missing": []},
+            {"screen": "Settings", "verdict": "fail", "score": 0.41,
+             "reason": "floor: block_match<0.85", "missing": ["Dark mode"]},
+        ],
+    }
 
-    bare = tmp_path / "b.json"
-    bare.write_text(json.dumps([{"id": "f2", "steps": []}]), encoding="utf-8")
-    pkg2, flows2 = load_flows(bare)
-    assert pkg2 is None and flows2[0]["id"] == "f2"
+
+def test_gate_report_rejects_other_json(tmp_path) -> None:
+    from ecat.uiflow.gate import GateReportError, load_gate_report
+
+    bad = tmp_path / "notgate.json"
+    bad.write_text('{"nodes": []}', encoding="utf-8")
+    with pytest.raises(GateReportError, match="screens"):
+        load_gate_report(bad)
+
+
+def test_gate_report_becomes_port_page_set() -> None:
+    from ecat.uiflow.gate import graph_from_gate_report
+
+    g = graph_from_gate_report(_gate_payload(), bundle="com.example.port")
+    assert g.side == "oh" and g.engine == "functional-gate" and g.method == "gate"
+    assert [p.label for p in g.pages] == ["Home", "Settings"]
+    assert all(p.countable for p in g.pages), "the port renders both screens; fidelity is extra"
+    assert g.pages[1].extra["gate_verdict"] == "fail"
+    assert g.pages[1].extra["missing"] == ["Dark mode"]
+
+
+def test_gate_only_pass_filters_screens() -> None:
+    from ecat.uiflow.gate import graph_from_gate_report
+
+    g = graph_from_gate_report(_gate_payload(), only_pass=True)
+    assert [p.label for p in g.pages] == ["Home"]
 
 
 # ── discovery (DroidBot) ──────────────────────────────────────────────────────

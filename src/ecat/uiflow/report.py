@@ -1,4 +1,4 @@
-"""Markdown renderers for the three layers (kept out of the CLI so tests can call them)."""
+"""Markdown renderers for the uiflow layers (kept out of the CLI so tests can call them)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ VERDICT_NOTE = {
     "finished": "自己 finish 了（多为缺前置参数/数据）",
     "redirect": "在栈里但被别的页盖住",
     "blocked_dialog": "被系统/权限弹窗挡住",
+    "dialog": "弹窗/权限页，不计入分母",
     "crashed_abi": "缺 .so，环境限制，不算 App 缺陷",
     "crashed_app": "应用崩溃（FATAL 归属该页）",
     "rejected": "am start 被拒（未导出/不存在）",
@@ -42,12 +43,12 @@ def inventory_markdown(graph: PageGraph, *, settle: float = 3.0) -> str:
             f"| {i} | `{short(page.component)}` | {exported} | {page.verdict} | "
             f"{page.detail[:60]} | `{top}` | {params} |"
         )
-    lines += ["", "> A 只回答“这页存在且能渲染”。FN 率的分母永远取 Layer B 的点击结果。"]
+    lines += ["", "> A 只回答“这页存在且能渲染”。FN 的分母来自发现结果或 functional gate 的 screens，不用 A。"]
     return "\n".join(lines) + "\n"
 
 
 def discover_markdown(graph: PageGraph, framework: dict[str, Any], out_dir: str) -> str:
-    """Layer B/D — pages found by an exploration engine (no hand-written flows)."""
+    """Layer B — pages found by an exploration engine (no hand-written flows)."""
     lines = [
         "# Layer B（发现）— 自动遍历出来的页面集合",
         "",
@@ -57,8 +58,8 @@ def discover_markdown(graph: PageGraph, framework: dict[str, Any], out_dir: str)
         f"{float(framework.get('time_spent') or 0):.0f}s",
         f"- 本图收录 App 内页面 **{len(graph.countable())}** · 跳转边 **{len(graph.edges)}**",
         "",
-        "> 自动遍历只回答“有哪些页面存在”。它的探索带有启发式，页面集合会随轮次浮动，",
-        "> 所以 FN 率的分母仍以可复现的点击流程（walk）为准。",
+        "> 自动遍历只回答“有哪些页面存在”。探索带启发式，页面集合会随轮次浮动；",
+        "> 需要稳定口径时用 functional gate 的 screens 或同一份 spec 复跑。",
         "",
         "## 页面",
         "",
@@ -73,30 +74,5 @@ def discover_markdown(graph: PageGraph, framework: dict[str, Any], out_dir: str)
         for e in graph.edges:
             src = by_key[e.src].label if e.src in by_key else e.src[:12]
             dst = by_key[e.dst].label if e.dst in by_key else e.dst[:12]
-            lines.append(f"| `{src}` | {e.action} | `{dst}` |")
-    return "\n".join(lines) + "\n"
-
-
-def walk_markdown(graph: PageGraph, results: list[Any]) -> str:
-    ok = sum(1 for r in results if r.ok)
-    failures = [f for r in results for f in r.failures]
-    lines = [
-        "# Layer B — 点击遍历（用户真实入口能到哪些页）",
-        "",
-        f"- 目标 `{graph.target}` · 设备 `{graph.device}` · 生成 {graph.generated}",
-        f"- 流程 {ok}/{len(results)} 通过 · 抵达页面 **{len(graph.countable())}** · 边 **{len(graph.edges)}**",
-    ]
-    if failures:
-        lines += ["", "## 断言失败", *[f"- {f}" for f in failures]]
-    lines += ["", "## 页面", "", "| page | 组件 | 首次出现于流程 |", "|---|---|---|"]
-    owner = {key: r.id for r in results for key in r.pages_seen}
-    for page in graph.pages:
-        lines.append(f"| `{page.label}` | `{short(page.component)}` | {owner.get(page.key, '—')} |")
-    if graph.edges:
-        lines += ["", "## 跳转边", "", "| from | action | to |", "|---|---|---|"]
-        by_key = {p.key: p for p in graph.pages}
-        for e in graph.edges:
-            src = short(by_key[e.src].component) if e.src in by_key else e.src[-14:]
-            dst = short(by_key[e.dst].component) if e.dst in by_key else e.dst[-14:]
             lines.append(f"| `{src}` | {e.action} | `{dst}` |")
     return "\n".join(lines) + "\n"
