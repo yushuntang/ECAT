@@ -67,6 +67,15 @@ class DroidBotRun:
 
 
 # ── locating a checkout ───────────────────────────────────────────────────────
+def _fallback_homes() -> list[Path]:
+    """Where a checkout is looked for when neither --droidbot-home nor the env var is set."""
+    return [
+        Path.cwd() / "third_party" / "droidbot",
+        Path.cwd() / "droidbot",
+        Path.home() / ".cache" / "ecat" / "droidbot",
+    ]
+
+
 def find_checkout(home: str | Path | None = None) -> Path:
     """A DroidBot checkout (not a pip install) — `start.py` must exist beside `droidbot/`."""
     candidates: list[Path] = []
@@ -75,11 +84,7 @@ def find_checkout(home: str | Path | None = None) -> Path:
     env = os.environ.get("ECAT_DROIDBOT_HOME")
     if env:
         candidates.append(Path(env))
-    candidates += [
-        Path.cwd() / "third_party" / "droidbot",
-        Path.cwd() / "droidbot",
-        Path.home() / ".cache" / "ecat" / "droidbot",
-    ]
+    candidates += _fallback_homes()
     for path in candidates:
         if (path / "start.py").is_file() and (path / "droidbot" / "__init__.py").is_file():
             return path
@@ -115,17 +120,24 @@ def _check_interpreter(python: str, checkout: Path) -> None:
 
 
 # ── device preparation ────────────────────────────────────────────────────────
-def enable_accessibility(adb: Adb) -> str | None:
+def enable_accessibility(adb: Adb, app_apk: Path | None = None) -> str | None:
     """Enable DroidBot's accessibility service and wait until it is really bound.
 
-    Returns the component that ended up enabled, or None when the app is not on the
-    device (DroidBot installs it on first use, so a first run legitimately has none).
+    The install happens here, before the secure setting is written: DroidBot's own
+    ordering (install inside set_up, then enable) is what left the service unbound on
+    newer Android. Returns None only when the app is neither installed nor installable.
     """
     package = ""
     for candidate in DROIDBOT_APP_PACKAGES:
         if adb.shell("pm", "list", "packages", candidate, check=False).strip():
             package = candidate
             break
+    if not package and app_apk is not None and app_apk.is_file():
+        adb.run("install", "-r", str(app_apk), timeout=180, check=False)
+        for candidate in DROIDBOT_APP_PACKAGES:
+            if adb.shell("pm", "list", "packages", candidate, check=False).strip():
+                package = candidate
+                break
     if not package:
         return None
 
@@ -173,14 +185,15 @@ def run_droidbot(
     tries: int = 3,
     extra_args: tuple[str, ...] = (),
     log: Any = None,
+    adb: Adb | None = None,
 ) -> DroidBotRun:
     checkout = find_checkout(home)
     interpreter = python or os.environ.get("ECAT_DROIDBOT_PYTHON") or sys.executable
     _check_interpreter(interpreter, checkout)
 
-    adb = Adb(serial)
+    adb = adb or Adb(serial)
     _preflight(adb)
-    component = enable_accessibility(adb)
+    component = enable_accessibility(adb, checkout / "droidbot" / "resources" / "droidbotApp.apk")
     if log:
         log(f"[discover] droidbot checkout={checkout}")
         log(f"[discover] accessibility={'enabled ' + component if component else 'not installed yet'}")

@@ -237,8 +237,56 @@ def test_graph_from_utg_can_keep_external() -> None:
     assert any(p.extra.get("external") for p in g.pages)
 
 
-def test_find_checkout_explains_the_pypi_trap(tmp_path) -> None:
-    from ecat.uiflow.discover import DroidBotError, find_checkout
+def test_find_checkout_explains_the_pypi_trap(tmp_path, monkeypatch) -> None:
+    from ecat.uiflow import discover
 
-    with pytest.raises(DroidBotError, match="start.py|checkout"):
-        find_checkout(tmp_path / "not-a-checkout")
+    monkeypatch.setattr(discover, "_fallback_homes", lambda: [])
+    monkeypatch.delenv("ECAT_DROIDBOT_HOME", raising=False)
+    with pytest.raises(discover.DroidBotError, match="start.py|checkout"):
+        discover.find_checkout(tmp_path / "not-a-checkout")
+
+
+def test_discover_retries_after_a_transient_droidbot_failure(tmp_path, monkeypatch) -> None:
+    """DroidBot dies on one adb blip: the runner must start a fresh attempt, not give up."""
+    from ecat.uiflow import discover
+
+    checkout = tmp_path / "droidbot"
+    (checkout / "droidbot").mkdir(parents=True)
+    (checkout / "droidbot" / "__init__.py").write_text("", encoding="utf-8")
+    (checkout / "start.py").write_text(
+        "import json, pathlib, sys\n"
+        "m = pathlib.Path('attempts.txt')\n"
+        "n = int(m.read_text()) + 1 if m.exists() else 1\n"
+        "m.write_text(str(n))\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])\n"
+        "if n == 1:\n"
+        "    print(\"AttributeError: 'NoneType' object has no attribute 'tear_down'\")\n"
+        "    sys.exit(1)\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "utg = {'app_package': 'pkg', 'num_nodes': 1, 'num_edges': 0,\n"
+        "       'nodes': [{'id': 'n1', 'package': 'pkg', 'activity': '.Main', 'structure_str': 'aaaa'}],\n"
+        "       'edges': []}\n"
+        "(out / 'utg.js').write_text('var utg =\\n' + json.dumps(utg))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(discover, "_check_interpreter", lambda *a, **k: None)
+
+    class _StubAdb:
+        serial = "stub"
+
+        def shell(self, *a, **k):
+            return "ok"
+
+        def run(self, *a, **k):
+            return ""
+
+        def wake(self):
+            return None
+
+    run = discover.run_droidbot(
+        tmp_path / "app.apk", "stub", tmp_path / "out",
+        home=checkout, python="python", tries=2, adb=_StubAdb(),  # type: ignore[arg-type]
+    )
+    assert run.attempts == 2, "one transient failure must cost a retry, not the run"
+    assert (checkout / "attempts.txt").read_text() == "2"
+    assert run.graph.countable()[0].label.startswith("Main")
