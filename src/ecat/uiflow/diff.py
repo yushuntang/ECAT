@@ -30,16 +30,6 @@ def _label_norm(text: str) -> str:
     return norm(head)
 
 
-def _text_norm(text: str) -> str:
-    """The on-screen texts a page label carries (`X[$hash] "a/b"` -> `ab`).
-
-    Needed for OpenHarmony: every page lives in one UIAbility, so the component is
-    identical everywhere and only the visible text distinguishes pages.
-    """
-    m = re.search(r'"([^"]*)"', text or "")
-    return norm(m.group(1)) if m else ""
-
-
 @dataclass
 class DiffResult:
     base_side: str
@@ -55,9 +45,14 @@ class DiffResult:
     extra: list[dict[str, str]] = field(default_factory=list)
     mapping_source: str = "none"
     warnings: list[str] = field(default_factory=list)
+    #: False when the numbers must not be quoted (one side is empty)
+    valid: bool = True
+    invalid_reason: str = ""
 
     @property
     def fn_rate(self) -> float:
+        if not self.valid:
+            return 0.0
         return round(len(self.missing) / self.base_count, 4) if self.base_count else 0.0
 
     @property
@@ -78,6 +73,8 @@ class DiffResult:
             "fn_rate": self.fn_rate,
             "coverage": self.coverage,
             "mapping_source": self.mapping_source,
+            "valid": self.valid,
+            "invalid_reason": self.invalid_reason,
             "warnings": self.warnings,
             "detail": {"matched": self.matched, "missing": self.missing, "extra": self.extra},
         }
@@ -124,8 +121,7 @@ class DiffResult:
 def _index(graph: PageGraph) -> dict[str, list[Page]]:
     idx: dict[str, list[Page]] = {}
     for page in graph.countable():
-        for key in {page.key, page.component, short(page.component),
-                    _label_norm(page.label), _text_norm(page.label)}:
+        for key in {page.key, page.component, short(page.component), _label_norm(page.label)}:
             if key:
                 idx.setdefault(norm(str(key)), []).append(page)
     return idx
@@ -189,13 +185,6 @@ def diff_graphs(
                         break
                 if hit:
                     break
-        if hit is None:  # last resort: same visible text (OH pages share one ability)
-            text_key = _text_norm(page.label)
-            if text_key:
-                for cand in port_idx.get(text_key, []):
-                    if cand.key not in used:
-                        hit, by = cand, "visible text"
-                        break
         if hit is not None:
             used.add(hit.key)
             result.matched.append(
@@ -209,6 +198,19 @@ def diff_graphs(
         if page.key not in used:
             result.extra.append({"label": page.label, "component": page.component, "key": page.key})
 
+    if not base_pages:
+        result.valid = False
+        result.invalid_reason = "B has no reachable pages — nothing to measure against"
+    elif not port_pages:
+        result.valid = False
+        result.invalid_reason = "C has no pages — the port side report is empty or was not imported"
+
     if base_idx and len(result.missing) == len(base_pages):
         result.warnings.append("mapping matched nothing — check the keys (component/short name/label)")
+    if port.method == "flows" and base_pages:
+        result.warnings.append(
+            f"C comes from {len(port_pages)} screen(s) named by the T2 flow spec, B is discovery "
+            f"({len(base_pages)} page(s)): a page no flow mentions reports as missing even when the "
+            "port renders it, so FN here is bounded by the spec's coverage, not by the port alone"
+        )
     return result

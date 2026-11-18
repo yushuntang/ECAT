@@ -7,8 +7,8 @@ It trusts neither class names, nor the manifest alone, nor "the launch returned 
                                 -> capability ceiling: the page exists and renders
     B  ecat uiflow discover     exploration on the original build (DroidBot)
                                 -> page set a user can reach, including pages nobody modelled
-    C  ecat uiflow import-gate  the port side, taken from the existing functional gate report
-                                -> what the port actually renders
+    C  ecat uiflow import-flows  the port side, from the T2 functional gate's report
+                                -> screens the port provably reaches
        ecat uiflow diff         |B \ C| / |B|, both directions reported
 
 Flows, screenshots and per-screen assertions stay where they already live in ECAT (the
@@ -19,6 +19,14 @@ side.
 `ecat uiflow diff` refuses an `amstart` graph as the denominator unless `--force` is
 passed: direct entry skips the real entry, so misses would be measured against a bar no
 user can clear.
+
+It also refuses to *print* an FN number when the number cannot mean anything — exit code
+2, the JSON artifact is still written with `valid: false` and the reason:
+
+* `C has no pages` — the T2 report was empty / not imported;
+* `B has no reachable pages` — discovery produced nothing;
+* `no spec screen matched an Android page` — the spec is older than the build
+  (structures moved), so every screen would look missing.
 
 ## 1. Layer A — inventory (capability ceiling)
 
@@ -77,23 +85,106 @@ Traps handled in code, not in a footnote:
 * DroidBot's accessibility bootstrap loops forever on newer Android — the secure setting
   is written here and verified through `dumpsys activity services`;
 * one transient adb failure ends a DroidBot run — the device is pre-flighted and the
-  whole exploration retried.
+  whole exploration is retried;
+* **page identity comes from the visible texts**, read from the UTG's own `content`
+  field. DroidBot's `structure_str` ignores text: every detail page of a list app shares
+  one hash (six plants, one label), while one screen visited twice keeps two nodes;
+* **a state with no text is not a page.** The frame the app shows between the launcher
+  tap and the first draw has an empty `content`; it is recorded as `empty_frame` and
+  stays out of the denominator, where it would otherwise be an unremovable "missing page".
 
-Discovery is heuristic: two runs can explore different states. Use it to find pages, and
-keep a spec-driven list (the gate's screens) as the stable denominator when you need
-comparable numbers across iterations.
+### Baselines — the same build must give the same number
 
-## 3. Layer C — the port side, from the functional gate
+Discovery is heuristic: two runs can explore different states (9 pages/14 edges vs
+9 pages/16 edges on the same build). So an exploration is pinned to the **APK sha256**
+(`reports/ui-flow/baselines/<sha>.utg.js` by default):
 
-    ecat uiflow import-gate --from <gate.json> --bundle <port.bundle> \
-        --out reports/ui-flow/table-C.json [--only-pass]
+    ecat uiflow discover --apk app.apk                      # explores once, pins the baseline
+    ecat uiflow discover --apk app.apk                      # same sha -> reuses it (no device, ~1 s)
+    ecat uiflow discover --apk app.apk --refresh            # deliberately explore again
 
-Every screen in the gate report is a screen the port renders (there was a port
-screenshot to score); the gate's own verdict (pass / suspect / fail), score, `missing`
-list and evidence paths are kept in each page's `extra`. `--only-pass` narrows the port
-set to screens that also pass the visual rubric.
+The graph records `stats.baseline` = `captured` / `reused` / `imported` and
+`stats.app_sha256`, and the spec records the sha it was generated from: a spec older than
+the build raises a "different build" warning instead of silently comparing structures that
+moved. Measured on a real APK: 117 s to explore, 0.8 s to reuse, identical graph.
 
-Then:
+## 3. Layer C — the port side, from the T2 functional gate
+
+    ecat uiflow import-flows --from <ui_runner-report.json> --bundle <port.bundle> \
+        --out reports/ui-flow/table-C.json [--no-failed-assertions]
+
+`docs/ecat-validation-layers.en.md` defines two side channels: **T2 functional** (flows +
+control-tree assertions, `tools/ui_runner.py`) and **T3 visual** (screenshot scoring,
+`tools/visual_gate.py`). Only T2 feeds page coverage here — a port page exists when a
+flow that declares it actually got there:
+
+| flow status | failing step | page | counted |
+|---|---|---|---|
+| `pass` | — | reached | yes |
+| `fail` | `expect_visible` / `expect_absent` / `expect_page_changed` | reached, `assert_failed` in `extra` | yes (disable with `--no-failed-assertions`) |
+| `fail` | anything else (tap / input / launch) | `finished`, **unless the trace proves the screen** | traced screens yes, later declared screens no |
+| `error` / `skip` | — | recorded with that verdict | no |
+
+A flow that dies on a tap must not erase a screen it already visited: the step trace is
+authoritative for what was on screen, so markers at or before the failing step count as
+reached (`extra.reached_via_trace`), and their hops still become edges. Without a trace the
+old rule applies — a flow that never got there credits nothing.
+
+Flow pass/fail/skip/error counters land in the graph's `stats` (`partial` counts flows that
+failed but still proved some screens), so a report can show how much of the number is
+assertion failures rather than missing screens.
+
+C also gets **action-level edges**, because `tools/ui_runner.py` now records a step trace
+(`trace: [{step, action, screen?, sig?}]`) on every result, passing or failing. A flow step
+may carry a `screen` marker — "after this action we are on that screen":
+
+    {"tap": "Add folder", "screen": "Picker.ets"}
+
+Consecutive markers become labelled edges (`source=trace`):
+
+    Home.ets --tap(Add folder)--> Picker.ets
+
+Verified on a real device: one flow, three steps, one edge. Reports produced before the
+trace existed (or flows without `screen` markers) fall back to the declared screen order
+(`source=flow-order`), which only says "related", not "by which action".
+
+Visual fidelity is **not** part of this number: it is scored per screenshot pair by T3 and
+belongs in its own column, otherwise a screen that exists but looks different gets counted
+as a missing page.
+
+## 3b. Spec mode — the join key, so no name or text matching is involved
+
+Set-diff by name cannot work across platforms: the Android side is
+`GardenActivity[$hash] "My garden…"`, the port side is `Garden.ets`, and the copy differs
+by definition (a copy difference is a T3 finding, not an identity). So identity is
+declared once in a spec file:
+
+    ecat uiflow spec-from-discovery --graph reports/ui-flow/table-B.json \
+        --out specs/ui-flow.spec.json        # skeleton: one row per content-free layout
+
+    {"schema_version": 1,
+     "screens": [
+       {"screen": "garden",
+        "android": {"structure": "c794bc91ea", "activity": ".GardenActivity"},
+        "port": {"screen": "Garden.ets"}},
+       {"screen": "detail",                       # same layout as another screen?
+        "android": {"structure": "aaaa1111", "text": "Plant list"},   # split it by text
+        "port": {"screen": "Index.ets"}}]}
+
+    ecat uiflow diff --base <B.json> --port <C.json> --spec specs/ui-flow.spec.json \
+        --out reports/ui-flow/diff.json
+
+Rules the implementation enforces:
+
+* **Android side** matches on the `structure` hash (content-free layout), optionally
+  narrowed by an `text` substring — no fuzzy matching, no "similar name" fallback.
+* **Port side** matches on the exact screen name the T2 report/flow spec uses.
+* "A page" is one layout: data variants (same screen, other item) are states of that page.
+  Otherwise adding a row to a list would raise the denominator and lower FN for nothing.
+* The report carries numbers, not prose: `spec_coverage` (how much of the discovered
+  Android page set the spec claims), `unlisted_android`, `unlisted_port`, `fn_rate`.
+
+Then (set-diff mode, still available when no spec exists):
 
     ecat uiflow diff --base reports/ui-flow/table-B.json --port reports/ui-flow/table-C.json \
         --mapping <android-to-port.json> --out reports/ui-flow/diff.json
@@ -101,12 +192,167 @@ Then:
     B=3 C=2 matched=2 missing=1 extra=0 FN=33.3%
       missing <page label> (<component>)
 
+`C` is bounded by the flow spec: a screen no flow mentions cannot appear in it, and the
+diff reports that as a warning on the result.
+
 * `B\C` — missing page: the port has no such screen → **FN**
 * `C\B` — extra page: merged / split / added structure → reported, not FN
 
 Matching order: explicit `--mapping`, then component / short name, then label, then the
 visible texts a page carries. Nothing about either side's naming is assumed; `--mapping`
 is how you declare that one side's page is the other side's.
+
+## 2b. Preflight — fail in seconds, not in five minutes
+
+`tools/ui_runner.py` checks the device and the installed build **before** any flow runs, and exits 2
+with a readable reason instead of turning a locked screen or a wrong HAP into a batch of fake failures:
+
+| condition | what happens |
+|---|---|
+| screen locked, no PIN | `wake_and_unlock()` is attempted, then re-checked |
+| still locked (PIN) | exit 2 — a human must unlock; the runner never guesses a code |
+| bundle not installed | exit 2 with the bundle name |
+| `--expect-version` mismatch | exit 2 ("bundle 名相同的两个 app 靠肉眼分不出来") |
+| `--bundle` omitted | exit 2 — there is no default, on purpose |
+
+The resolved `{bundle, version}` lands in the report's `app` block, and `uiflow report` copies it into
+the verdict, so a stored artifact says which build the number describes.
+
+## 3. One verdict — every gate, one file, one exit code
+
+    ecat uiflow report --base <B.json> --port-report <T2 report> --spec <spec.json> \
+        [--flows <flow spec>] [--port-dir <harmony project>] --bundle <bundle> \
+        --out reports/ui-flow/verdict.json
+
+Runs the gates in order and writes one JSON + one Markdown with a single status:
+
+| status | exit | meaning |
+|---|---|---|
+| `PASS` | 0 | port check clean, flows honest, port measured, `fn_rate` present |
+| `FAIL` | 1 | a gate rejected the run — reasons listed, no FN |
+| `BLOCKED` | 4 | the port was not measured (dependency-blocked / nothing passed) — `fn_rate` null |
+| `ERROR` | 2 | inputs missing or unreadable |
+
+`fn_rate` is only ever non-null when the status is `PASS`, so a CI job cannot pick up a number the
+gates refused to vouch for. Existing per-layer commands stay for debugging; this is what CI calls.
+
+## 3e. Spec, half-automatic — propose, then confirm
+
+    ecat uiflow spec-from-discovery --graph <B.json> --port-dir <harmony project> --out spec.json
+    ecat uiflow spec-confirm --spec spec.json [--only screen1,screen2]
+
+`spec-from-discovery` now pairs each discovered Android layout with a port page from the registry
+(`main_pages.json`), scoring names and the visible text discovery recorded:
+
+| score | rule | meaning |
+|---|---|---|
+| 1.0 | same tokens | `Garden` ↔ `Garden` |
+| 0.8 | one contains the other | `GardenActivity` ↔ `Garden`, `DetailActivity` ↔ `PlantDetail` |
+| ≤0.5 | partial overlap | weak — below the 0.4 floor it proposes nothing |
+| 0.0 | nothing shared | left empty, with the unclaimed port pages printed as a shortlist |
+
+Proposals are written with `"auto": true` and a `AUTO 候选 … (score …)` note. One port page is only
+ever claimed once, so two Android layouts cannot be paired to the same screen. `uiflow report` adds a
+`spec-reviewed` check (`warn` + a reason while any row is still `auto`) — the FN number is only as
+trustworthy as those pairings, so it says so out loud. `spec-confirm` clears the flag once a human
+looked.
+
+Suite-side: bare stems and `.ets` names are the same screen (`Garden` == `Garden.ets`), because the
+registry says the former and flow specs say the latter.
+
+## 3f. State level — a tab is not a page, but it can still be missing
+
+Page-level FN cannot see a whole view disappearing inside a page (a tab, a filter, a panel): merge
+two screens into one file and the page number gets *better*. States close that hole.
+
+```json
+{"screen": "garden", "android": {"structure": "c794…"}, "port": {"screen": "Garden.ets"},
+ "states": [
+   {"id": "my_garden",  "android": {"text": "My garden"}, "port": {"state": "my_garden"}},
+   {"id": "plant_list", "android": {"text": "Beet"},      "port": {"state": "plant_list"}}]}
+```
+
+Evidence rules — each side must supply its own proof, never a name match:
+
+| side | evidence | where it comes from |
+|---|---|---|
+| Android | the state's `android.text` tokens appear in a discovered label of that layout | discovery (`structure` + visible text) |
+| port | a flow step that lands on the screen declares `"state": "<id>"` | `ui_runner` trace → `Page.extra["states"]` |
+
+A state with no Android evidence is not counted (nothing to prove); a state Android shows but no
+flow ever demonstrates becomes **state FN** (`state-coverage` check → `FAIL`, listed by
+`screen/state`). The page-level `fn_rate` is unchanged, so the two numbers stay separable — on this
+project's sunflower port the page number is `0.0%` while a deliberately removed state shows
+`state FN = 33.3%`, which a page-only run reports as a plain pass.
+
+## 3d. History — a number means nothing without the previous one
+
+`uiflow report` appends every verdict to `reports/ui-flow/history/<bundle>.jsonl` (keyed by the
+measured build) and prints the delta against the previous run of the same bundle:
+
+| delta verdict | meaning |
+|---|---|
+| `regression` | a page that used to be present is now missing (`FN` went up) |
+| `fixed` | a previously missing page is now covered |
+| `unchanged` | same status, same FN, same page set |
+| — | `PASS → BLOCKED` is reported as *unmeasurable*, never as *worse* |
+| `first_run` | no baseline yet |
+
+    ecat uiflow history --bundle <bundle> [--limit N]    # 历次：状态 / FN / 页面数 / 缺失数 / 死页数
+
+Two honesty rules: a run without `--port-dir` records `port_checked: false`, so dead pages are never
+compared against it (no fake "dead page fixed"); and a `BLOCKED` run stores `fn_rate: null`, so it
+cannot masquerade as a 0% improvement.
+
+## 3c. Flow audit — a green flow is not evidence
+
+    ecat uiflow audit-flows --flows <spec.json> [--report <T2 report>] --out reports/ui-flow/flow-audit.json
+
+Reads the spec (and optionally a report); no device. Exit 1 on any high-severity finding.
+
+| check | severity | meaning |
+|---|---|---|
+| `no_assertion` | high | the flow asserts nothing — it can only "pass" |
+| `no_navigation_assertion` | high | it taps/inputs but never checks the screen changed |
+| `reset_vs_expectation` | medium | step 1 is `reset` (`bm clean`) yet the flow expects content — it wipes the data it asserts. Mark the one flow that *creates* that data with `"seed": true` and it is exempt |
+| `no_screen_markers` | medium | `screens` declared but no step carries `"screen"` → no page identity, no edges |
+| `pass_without_evidence` | low | passing flows recorded neither `actual` nor `trace` → the FN rate cannot be attributed |
+
+On this project's sunflower spec the audit returns 5 medium `reset_vs_expectation` findings and
+no high ones — which matches what the device did: every flow starts by clearing the app data and
+then expects `Apple` to be on screen.
+
+## 4. Port check — does the spec name screens the port actually ships?
+
+    ecat uiflow check-port --spec <spec.json> --port-dir <harmony project> --out reports/ui-flow/port-check.json
+    ecat uiflow diff ... --spec <spec.json> --port-dir <harmony project>   # gate before diffing
+
+Reads `main_pages.json`, the entry ability's `loadContent` and every `router.pushUrl`; no device.
+`diff --port-dir` **refuses to run (exit 2)** when the spec names a page that is not registered —
+a typo would otherwise be reported as a page the port is missing.
+
+| check | severity | meaning |
+|---|---|---|
+| `unknown_screen` | error | spec's `port.screen` is not in `main_pages.json` |
+| `port_screen_missing` | error | spec row has no `port.screen` at all |
+| `entry_uncovered` | warning | the page the ability loads on start is never asserted |
+| `orphan_page` | info | a registered page that neither `loadContent` nor any `pushUrl` reaches — dead surface FN can never see |
+| `no_registry` | warning | `--port-dir` has no `main_pages.json`, check skipped |
+
+## 5. Tests: layer A and the whole chain
+
+`tests/unit/test_uiflow_layers.py` covers what used to be untested:
+
+* **A layer without a device** — `Adb` is nine small methods, so `FakeAdb` replays a phone:
+  reached / `am start` refused / activity finishes itself / crash with a missing ABI / adb dying
+  mid-sweep. The sweep must type each row and survive one dead probe.
+* **`build_params`** — the parameterised-entry half, including `--es/--ei/--ez` and `raw_args`.
+* **the chain** — an `amstart` graph is refused as a denominator, then B (click) + C (flow report) +
+  spec produce an FN, edges, state coverage and a verdict in one test.
+
+Writing these found a real bug: `apk_abis` filtered `n.count("/") > 2`, but `lib/<abi>/<lib>.so` has
+exactly two slashes — so it returned `[]` for every APK and `crashed_abi` could never be reported.
+The real gallery APK ships 7 ABIs and now says so.
 
 ## Two rules that decide whether the number means anything
 

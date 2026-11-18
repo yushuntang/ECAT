@@ -30,14 +30,16 @@ VERDICTS = (
     "redirect",
     "blocked_dialog",
     "dialog",
+    "empty_frame",
     "crashed_abi",
     "crashed_app",
     "rejected",
     "unknown",
 )
 
-#: "amstart" = Layer A (deterministic entry), "click" = Layers B/C (real entry)
-METHODS = ("amstart", "click")
+#: "amstart" = Layer A (deterministic entry), "click" = discovery/walk of the real
+#: entry, "gate" = the port side imported from the functional-gate report
+METHODS = ("amstart", "click", "gate")
 
 
 def norm(text: str) -> str:
@@ -59,18 +61,34 @@ def fingerprint(root: ET.Element, activity: str) -> tuple[str, str]:
     "different" nodes, inflating every page count downstream.
     """
     parts: list[str] = []
-    texts: list[str] = []
     for node in root.iter("node"):
         for attr in ("text", "content-desc"):
             value = (node.get(attr) or "").strip()
             if not value or _NUMERICISH.match(value):
                 continue
             parts.append(value)
-            if attr == "text":
-                texts.append(value)
-    digest = hashlib.sha1("\n".join(sorted(parts)).encode("utf-8")).hexdigest()[:10]
-    head = "/".join(texts[:2])[:48]
-    label = f"{short(activity)}[${digest}]" + (f' "{head}"' if head else "")
+    return fingerprint_texts(parts, activity)
+
+
+def fingerprint_texts(texts: Iterable[str], component: str = "", *, digest_len: int = 10) -> tuple[str, str]:
+    """(stable hash, human label) for a screen described only by what a user sees.
+
+    One identity rule for every engine: a live adb/uitest dump and DroidBot's UTG
+    both reduce to a set of strings, and the page *is* that set. View structure is
+    the wrong key — it ignores text (every detail page of a list app shares one
+    structure) and it splits one screen visited twice into two nodes. Labels carry
+    the first short texts so two rows of a report are told apart by what they show,
+    not by a hash.
+    """
+    values = [t.strip() for t in texts if (t or "").strip()]
+    digest = hashlib.sha1("\n".join(sorted(values)).encode("utf-8")).hexdigest()[:digest_len]
+    # label head: the two shortest short texts, ties broken alphabetically. Document
+    # order is not stable between two dumps of the same screen (one run lists the tab
+    # titles first, the next lists the title bar), so picking "the first two" made the
+    # label change while the fingerprint stayed the same.
+    head_parts = sorted({v for v in values if len(v) <= 40}, key=lambda v: (len(v), v))[:2]
+    head = "/".join(sorted(head_parts))[:48]
+    label = f"{short(component) or 'Screen'}[${digest}]" + (f' "{head}"' if head else "")
     return digest, label
 
 
@@ -147,8 +165,10 @@ class PageGraph:
     target: str = ""
     device: str = ""
     generated: str = ""
-    #: how the graph was produced: "" (walk), "droidbot", ... — kept for the report
+    #: how the graph was produced: "droidbot", "functional-gate:...", ... — kept for the report
     engine: str = ""
+    #: per-source counters that must travel with the graph (flow pass/fail/skip, ...)
+    stats: dict[str, Any] = field(default_factory=dict)
     pages: list[Page] = field(default_factory=list)
     edges: list[Edge] = field(default_factory=list)
 
@@ -199,6 +219,7 @@ class PageGraph:
             "device": self.device,
             "generated": self.generated or time.strftime("%Y-%m-%d %H:%M:%S"),
             "engine": self.engine,
+            "stats": self.stats,
             "summary": self.summary(),
             "pages": [p.to_dict() for p in self.pages],
             "edges": [e.to_dict() for e in self.edges],
@@ -222,6 +243,7 @@ class PageGraph:
             device=d.get("device", ""),
             generated=d.get("generated", ""),
             engine=d.get("engine", ""),
+            stats=d.get("stats") or {},
             pages=[Page.from_dict(p) for p in d.get("pages", [])],
             edges=[Edge.from_dict(e) for e in d.get("edges", [])],
         )

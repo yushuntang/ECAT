@@ -24,3 +24,6 @@ dist/
 
 # macOS
 .DS_Store
+
+# uiflow run artifacts (verdicts, history, graphs)
+reports/

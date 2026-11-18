@@ -24,6 +24,7 @@ Also on retry duty: DroidBot has zero tolerance for a transient adb failure (one
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -36,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from ecat.uiflow.device import Adb, DeviceError
-from ecat.uiflow.models import Edge, Page, PageGraph, short
+from ecat.uiflow.models import Edge, Page, PageGraph, fingerprint_texts, short
 
 #: package DroidBot installs on the device to expose the view tree
 DROIDBOT_APP_PACKAGES = ("io.github.ylimit.droidbotapp", "io.github.privacystreams.droidbot")
@@ -99,15 +100,24 @@ def find_checkout(home: str | Path | None = None) -> Path:
 
 def _check_interpreter(python: str, checkout: Path) -> None:
     """Fail with the fix, not with a traceback 40 s into a run."""
+    required = ("pkg_resources", "networkx", "androguard")
     probe = subprocess.run(
-        [python, "-c", "import pkg_resources, networkx"],
+        [python, "-c", "import importlib.util, json, sys\n"
+         "missing = [m for m in sys.argv[1:] if not importlib.util.find_spec(m)]\n"
+         "print(json.dumps(missing))", *required],
         capture_output=True,
         text=True,
         cwd=str(checkout),
     )
-    if probe.returncode == 0:
+    if probe.returncode == 0 and not (probe.stdout or "").strip().strip("[]"):
         return
     err = (probe.stderr or probe.stdout or "").strip()
+    if "androguard" in err:
+        raise DroidBotError(
+            f"'{python}' is missing androguard, which DroidBot imports to read the APK "
+            "(a run would fail after three attempts):\n"
+            f"  {python} -m pip install -r {checkout / 'requirements.txt'}"
+        )
     if "pkg_resources" in err:
         raise DroidBotError(
             f"'{python}' has setuptools>=81, which dropped pkg_resources (DroidBot imports it).\n"
@@ -241,6 +251,10 @@ def run_droidbot(
         utg_path = out_dir / "utg.js"
         if utg_path.is_file():
             framework = parse_utg(utg_path)
+            framework.setdefault("policy", policy)
+            framework.setdefault("count", count)
+            if Path(apk).is_file():
+                framework.setdefault("app_sha256", file_sha256(apk))
             if framework.get("num_nodes"):
                 return DroidBotRun(out_dir=out_dir, framework=framework, attempts=attempt,
                                    log_tail=last_log[-2000:])
@@ -256,19 +270,92 @@ def run_droidbot(
 
 
 # ── parsing ───────────────────────────────────────────────────────────────────
+def file_sha256(path: Path | str) -> str:
+    """Content hash of the APK — the identity a baseline is pinned to."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def baseline_path(baseline_dir: Path | str, app_sha256: str) -> Path:
+    return Path(baseline_dir) / f"{app_sha256}.utg.js"
+
+
+def load_baseline(baseline_dir: Path | str | None, app_sha256: str) -> Path | None:
+    """An exploration pinned to this exact APK build, if one was stored before."""
+    if not baseline_dir or not app_sha256:
+        return None
+    candidate = baseline_path(baseline_dir, app_sha256)
+    return candidate if candidate.is_file() else None
+
+
+def store_baseline(utg_path: Path, baseline_dir: Path | str, app_sha256: str) -> Path:
+    """Freeze this exploration so the next run on the same build is reproducible."""
+    target = baseline_path(baseline_dir, app_sha256)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(utg_path, target)
+    return target
+
+
 def parse_utg(path: Path) -> dict[str, Any]:
-    """`utg.js` is `var utg = {…}` — a JSON object behind a JS assignment."""
-    text = Path(path).read_text(encoding="utf-8", errors="replace")
-    body = text.split("var utg", 1)[-1]
-    body = body.split("=", 1)[-1].strip() if "=" in body else body.strip()
-    if body.startswith("="):
-        body = body[1:]
+    """`utg.js` is `var utg = {…}`; ECAT's own `*.utg.json` snapshot is plain JSON.
+
+    Both forms are accepted. The JS prefix is stripped only when it is really there —
+    splitting on the first `=` in a plain JSON file truncates it (any `=` inside a
+    captured text used to do exactly that on our own snapshots).
+    """
+    text = Path(path).read_text(encoding="utf-8", errors="replace").lstrip()
+    body = text.split("=", 1)[1].strip() if text.startswith("var utg") and "=" in text else text
     parsed: dict[str, Any] = json.loads(body)
     return parsed
 
 
+#: a view id, e.g. `android:id/content` or `com.x:id/list` — never a user-visible label
+_RESOURCE_ID = re.compile(r"[\w.]+:id/")
+
+#: the state hash DroidBot prints as the third header line when `state_str` is absent
+_STATE_HASH = re.compile(r"^[0-9a-f]{8,}$")
+
+
+def visible_texts(node: dict[str, Any]) -> list[str]:
+    """The texts DroidBot recorded for one state, from the UTG's own `content` field.
+
+    `content` = `<package>\n<activity>\n<state hash>` followed by one comma-joined
+    block per view. The header lines are recognised from the node's own fields (not
+    from a fixed line count), so an empty state really comes back empty instead of
+    reporting its own package name as a label. Engine-agnostic by construction: it
+    reads DroidBot's output format, so no app needs to be known here.
+    """
+    lines = str(node.get("content") or "").splitlines()
+    header = {
+        str(node.get(field) or "").strip()
+        for field in ("package", "activity", "state_str", "id")
+    }
+    while lines and (lines[0].strip() in header or _STATE_HASH.match(lines[0].strip())):
+        lines.pop(0)
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        for part in line.split(","):
+            text = part.strip()
+            if not text or _RESOURCE_ID.search(text) or text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+    return out
+
+
 def graph_from_utg(framework: dict[str, Any], *, include_external: bool = False) -> PageGraph:
-    """UTG -> PageGraph. States outside the app under test are dropped by default."""
+    """UTG -> PageGraph. States outside the app under test are dropped by default.
+
+    Page identity comes from the **visible texts** (`fingerprint_texts`), not from
+    DroidBot's `structure_str`: structure ignores text, so every detail page of a
+    list app collapses into one hash while a screen visited twice keeps two nodes.
+    A state with no text at all is recorded as `empty_frame` — the start-up frame
+    between two screens is not a page, and counting it inflates the denominator.
+    """
     app_package = framework.get("app_package") or ""
     graph = PageGraph(
         side="android",
@@ -278,34 +365,55 @@ def graph_from_utg(framework: dict[str, Any], *, include_external: bool = False)
         generated=framework.get("test_date", ""),
         engine="droidbot",
     )
+    graph.stats.update(
+        {
+            "app_sha256": str(framework.get("app_sha256") or ""),
+            "policy": str(framework.get("policy") or ""),
+            "count": framework.get("count"),
+            "explored_at": str(framework.get("test_date") or ""),
+            "num_nodes": framework.get("num_nodes"),
+            "num_edges": framework.get("num_edges"),
+        }
+    )
 
-    kept: set[str] = set()
+    node_key: dict[str, str] = {}
     for node in framework.get("nodes") or []:
         package = node.get("package") or ""
         if not include_external and app_package and package != app_package:
             continue
         activity = str(node.get("activity") or "")
-        structure = str(node.get("structure_str") or "")
         component = f"{package}/{activity}" if package else activity
-        page = Page(
-            key=str(node.get("id")),
-            label=f"{short(activity) or 'Screen'}[${structure[:6]}]",
-            component=component,
-            verdict="reached",
-            side="android",
-            extra={
-                "activity": activity,
-                "structure": structure,
-                "screenshot": node.get("image"),
-                "external": bool(app_package and package != app_package),
-            },
+        texts = visible_texts(node)
+        if texts:
+            digest, label = fingerprint_texts(texts, activity)
+            verdict, detail = "reached", ""
+        else:
+            digest = str(node.get("structure_str") or node.get("id") or "empty")[:10]
+            label = f"{short(activity) or 'Screen'}[${digest}]"
+            verdict, detail = "empty_frame", "no visible text — start-up frame, not a page"
+        page = graph.add_page(
+            Page(
+                key=f"{component}#{digest}",
+                label=label,
+                component=component,
+                verdict=verdict,
+                detail=detail,
+                side="android",
+                extra={
+                    "activity": activity,
+                    "structure": str(node.get("structure_str") or ""),
+                    "screenshot": node.get("image"),
+                    "external": bool(app_package and package != app_package),
+                    "texts": texts[:8],
+                },
+            )
         )
-        graph.add_page(page)
-        kept.add(page.key)
+        node_key[str(node.get("id"))] = page.key
 
     for edge in framework.get("edges") or []:
-        src, dst = str(edge.get("from")), str(edge.get("to"))
-        if src not in kept or dst not in kept:
+        src = node_key.get(str(edge.get("from")))
+        dst = node_key.get(str(edge.get("to")))
+        if not src or not dst:
             continue
         actions = [
             str((ev or {}).get("event_str") or (ev or {}).get("event_type") or "event")

@@ -127,7 +127,13 @@ def apk_abis(apk: Path) -> list[str]:
     """Native ABIs shipped by the APK — surfaces `crashed_abi` before blaming the app."""
     try:
         with zipfile.ZipFile(apk) as z:
-            return sorted({n.split("/")[1] for n in z.namelist() if n.startswith("lib/") and n.count("/") > 2})
+            # `lib/<abi>/<lib>.so` has exactly two slashes — `> 2` silently returned nothing,
+            # which made every crash look like `crashed_app` instead of `crashed_abi`
+            return sorted({
+                parts[1]
+                for n in z.namelist()
+                if n.startswith("lib/") and len(parts := n.split("/")) >= 3 and parts[1]
+            })
     except (zipfile.BadZipFile, OSError):
         return []
 

@@ -13,6 +13,7 @@ VERDICT_NOTE = {
     "redirect": "在栈里但被别的页盖住",
     "blocked_dialog": "被系统/权限弹窗挡住",
     "dialog": "弹窗/权限页，不计入分母",
+    "empty_frame": "屏幕上没有任何文本（启动白帧），不是页面，不计入分母",
     "crashed_abi": "缺 .so，环境限制，不算 App 缺陷",
     "crashed_app": "应用崩溃（FATAL 归属该页）",
     "rejected": "am start 被拒（未导出/不存在）",
@@ -56,7 +57,8 @@ def discover_markdown(graph: PageGraph, framework: dict[str, Any], out_dir: str)
         f"- 产物 `{out_dir}` · 框架统计：{framework.get('num_nodes')} 状态 / "
         f"{framework.get('num_edges')} 边 / 触达 {framework.get('num_reached_activities')} 个页面组件 / "
         f"{float(framework.get('time_spent') or 0):.0f}s",
-        f"- 本图收录 App 内页面 **{len(graph.countable())}** · 跳转边 **{len(graph.edges)}**",
+        f"- 本图收录 App 内页面 **{len(graph.countable())}** · 跳转边 **{len(graph.edges)}** · "
+        f"判定分布 {graph.verdict_counts()}",
         "",
         "> 自动遍历只回答“有哪些页面存在”。探索带启发式，页面集合会随轮次浮动；",
         "> 需要稳定口径时用 functional gate 的 screens 或同一份 spec 复跑。",

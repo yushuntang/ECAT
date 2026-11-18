@@ -564,7 +564,7 @@ def uiflow_inventory(
 
 @uiflow_app.command("discover")
 def uiflow_discover(
-    apk: Annotated[Path | None, typer.Option("--apk", help="original APK to explore (not the patched one)")] = None,
+    apk: Annotated[Path | None, typer.Option("--apk", "-a", help="original APK to explore (not the patched one)")] = None,
     serial: Annotated[str, typer.Option("--serial", help="adb serial")] = "emulator-5630",
     out: Annotated[Path, typer.Option("--out", help="output graph JSON (a .md sits next to it)")] = Path(
         "reports/ui-flow/table-B.json"
@@ -577,48 +577,78 @@ def uiflow_discover(
     tries: Annotated[int, typer.Option("--tries", help="retries on transient adb failures")] = 3,
     include_external: Annotated[bool, typer.Option("--include-external", help="keep other apps' screens")] = False,
     from_utg: Annotated[Path | None, typer.Option("--from-utg", help="import an existing utg.js instead of running")] = None,
+    baseline_dir: Annotated[Path, typer.Option("--baseline-dir", help="where explorations are pinned by APK sha")] = Path(
+        "reports/ui-flow/baselines"
+    ),
+    refresh: Annotated[bool, typer.Option("--refresh", help="explore again even if a baseline exists for this build")] = False,
 ) -> None:
-    """Layer B（发现）— 用 DroidBot 自动遍历出页面集合与跳转边（无需手写流程）。"""
+    """Layer B（发现）— 用 DroidBot 自动遍历；同一个 APK sha 默认复用已固定的基线。"""
     import json as _json
 
     from ecat.uiflow.discover import (
         DroidBotError,
+        file_sha256,
         graph_from_utg,
+        load_baseline,
         parse_utg,
         run_droidbot,
+        store_baseline,
         summary_line,
     )
     from ecat.uiflow.report import discover_markdown
 
+    framework: dict = {}
+    out_dir = ""
+    mode = ""
+    sha = file_sha256(apk) if apk is not None and apk.exists() else ""
+
     try:
         if from_utg is not None:
+            if not from_utg.exists():
+                console.print(f"[red]UTG not found: {from_utg}[/red]")
+                raise typer.Exit(1)
             framework = parse_utg(from_utg)
-            graph = graph_from_utg(framework, include_external=include_external)
-            out_dir = str(from_utg.parent)
+            out_dir, mode = str(from_utg.parent), "imported"
             console.print(f"[yellow]imported existing UTG {from_utg}[/yellow]")
         else:
             if apk is None or not apk.exists():
                 console.print(f"[red]APK not found: {apk} (or pass --from-utg)[/red]")
                 raise typer.Exit(1)
-            run = run_droidbot(
-                apk,
-                serial,
-                out.parent / "droidbot-run",
-                home=home or None,
-                python=python or None,
-                policy=policy,
-                count=count,
-                timeout=timeout,
-                tries=tries,
-                log=lambda m: console.print(m, markup=False, highlight=False),
-            )
-            graph = graph_from_utg(run.framework, include_external=include_external)
-            framework, out_dir = run.framework, str(run.out_dir)
-            console.print(summary_line(run))
+            sha = file_sha256(apk)
+            pinned = None if refresh else load_baseline(baseline_dir, sha)
+            if pinned is not None:
+                framework = parse_utg(pinned)
+                out_dir, mode = str(pinned.parent), "reused"
+                console.print(f"[cyan]reusing baseline for sha {sha[:12]}… ({pinned.name})[/cyan]")
+            else:
+                run = run_droidbot(
+                    apk,
+                    serial,
+                    out.parent / "droidbot-run",
+                    home=home or None,
+                    python=python or None,
+                    policy=policy,
+                    count=count,
+                    timeout=timeout,
+                    tries=tries,
+                    log=lambda m: console.print(m, markup=False, highlight=False),
+                )
+                framework, out_dir, mode = run.framework, str(run.out_dir), "captured"
+                console.print(summary_line(run))
+
+        sha = sha or str(framework.get("app_sha256") or "")
+        if sha and mode != "reused":
+            utg_path = from_utg if from_utg is not None else Path(out_dir) / "utg.js"
+            if utg_path.is_file():
+                stored = store_baseline(utg_path, baseline_dir, sha)
+                console.print(f"[dim]baseline pinned: {stored}[/dim]")
+        graph = graph_from_utg(framework, include_external=include_external)
     except DroidBotError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
+    graph.stats["baseline"] = mode
+    graph.stats["baseline_sha"] = sha[:12]
     path = graph.save(out)
     path.with_suffix(".md").write_text(discover_markdown(graph, framework, out_dir), encoding="utf-8")
     path.with_suffix(".utg.json").write_text(
@@ -628,42 +658,277 @@ def uiflow_discover(
         console.print(f"  {page.label:32s} {page.component.rsplit('/', 1)[-1]}")
     console.print(
         f"[green]discover -> {path}[/green] (+ .md, + .utg.json) · "
-        f"pages={len(graph.countable())} edges={len(graph.edges)}"
+        f"pages={len(graph.countable())} edges={len(graph.edges)} · baseline={mode} sha={sha[:12]}"
     )
 
 
-@uiflow_app.command("import-gate")
-def uiflow_import_gate(
-    report: Annotated[Path, typer.Option("--from", help="functional-gate report (gate.json)")],
+@uiflow_app.command("import-flows")
+def uiflow_import_flows(
+    report: Annotated[Path, typer.Option("--from", help="T2 functional-gate report (ui_runner JSON)")],
     out: Annotated[Path, typer.Option("--out", help="output graph JSON")] = Path("reports/ui-flow/table-C.json"),
     bundle: Annotated[str, typer.Option("--bundle", help="port bundle name (label only)")] = "",
     device: Annotated[str, typer.Option("--device", help="device that produced the report")] = "",
-    only_pass: Annotated[bool, typer.Option("--only-pass", help="count only screens the gate passed")] = False,
+    no_failed_assertions: Annotated[
+        bool,
+        typer.Option("--no-failed-assertions", help="do not count screens whose flow failed on an assertion"),
+    ] = False,
 ) -> None:
-    """Layer C — 直接吃现有 functional gate 的报告，不另起一套流程/截图逻辑。"""
-    from ecat.uiflow.gate import (
-        GateReportError,
-        gate_summary,
-        graph_from_gate_report,
-        load_gate_report,
+    """Layer C（到达）— 吃 T2 functional gate 的 ui_runner 报告，一屏一页。"""
+    from ecat.uiflow.flows_report import (
+        FlowsReportError,
+        flows_summary,
+        graph_from_flows_report,
+        load_flows_report,
     )
 
     if not report.exists():
-        console.print(f"[red]gate report not found: {report}[/red]")
+        console.print(f"[red]flows report not found: {report}[/red]")
         raise typer.Exit(1)
     try:
-        payload = load_gate_report(report)
-    except (GateReportError, ValueError) as exc:
+        payload = load_flows_report(report)
+    except (FlowsReportError, ValueError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from exc
 
-    graph = graph_from_gate_report(payload, bundle=bundle, device=device, only_pass=only_pass)
-    path = graph.save(out)
-    console.print(gate_summary(payload))
-    console.print(
-        f"[green]C graph -> {path}[/green] · pages={len(graph.countable())}"
-        + ("  [yellow](only-pass)[/yellow]" if only_pass else "")
+    graph = graph_from_flows_report(
+        payload,
+        bundle=bundle,
+        device=device,
+        include_failed_assertions=not no_failed_assertions,
     )
+    path = graph.save(out)
+    console.print(flows_summary(payload))
+    console.print(f"  stats: {graph.stats}")
+    console.print(f"[green]C graph -> {path}[/green] · pages={len(graph.countable())}")
+
+
+@uiflow_app.command("spec-from-discovery")
+def uiflow_spec_from_discovery(
+    graph: Annotated[Path, typer.Option("--graph", help="Layer B graph (discovery output)")],
+    out: Annotated[Path, typer.Option("--out", help="spec JSON to write")] = Path("specs/ui-flow.spec.json"),
+    prefix: Annotated[str, typer.Option("--prefix", help="prefix for generated screen names")] = "",
+    port_dir: Annotated[
+        Path | None, typer.Option("--port-dir", help="harmony project: propose port.screen candidates from its page registry")
+    ] = None,
+) -> None:
+    """从发现结果生成 spec 骨架，并用端口注册页给出候选配对（人只做二选一确认）。"""
+    from ecat.uiflow.models import PageGraph
+    from ecat.uiflow.portcheck import read_port_pages
+    from ecat.uiflow.spec import spec_from_graph
+
+    if not graph.exists():
+        console.print(f"[red]graph not found: {graph}[/red]")
+        raise typer.Exit(1)
+    port_pages = []
+    if port_dir is not None:
+        if not port_dir.exists():
+            console.print(f"[red]port dir not found: {port_dir}[/red]")
+            raise typer.Exit(1)
+        pages = read_port_pages(port_dir)
+        port_pages = list(pages.registered)
+        if not port_pages:
+            console.print(f"[yellow]no main_pages.json under {port_dir} — no candidates proposed[/yellow]")
+
+    spec = spec_from_graph(PageGraph.load(graph), name_prefix=prefix, port_pages=port_pages or None)
+    path = spec.save(out)
+    console.print(
+        f"[green]spec -> {path}[/green] · {len(spec.screens)} screen(s)"
+        f" · 自动配对 {len(spec.unconfirmed())} · 仍空 {len(spec.missing_port_screens())}"
+    )
+    for row in spec.screens:
+        if row.auto:
+            console.print(f"  [yellow]?[/yellow] {row.screen} -> [bold]{row.port_screen}[/bold]  [dim]{row.note}[/dim]")
+        elif not row.port_key:
+            console.print(f"  [red]·[/red] {row.screen} -> (待填)  [dim]{row.note}[/dim]")
+    claimed = {row.port_screen for row in spec.screens if row.port_screen}
+    left = [p for p in port_pages if p not in claimed]
+    if left:
+        console.print(f"  [dim]端口还有 {len(left)} 个页没被认领，可人工挑：{', '.join(left[:8])}[/dim]")
+    if spec.unconfirmed():
+        console.print(
+            f"[yellow]{len(spec.unconfirmed())} 屏是启发式猜的配对：改完确认后跑 "
+            f"`ecat uiflow spec-confirm --spec {path}`[/yellow]"
+        )
+
+
+@uiflow_app.command("spec-confirm")
+def uiflow_spec_confirm(
+    spec: Annotated[Path, typer.Option("--spec", help="spec whose AUTO rows a human has reviewed")],
+    only: Annotated[str, typer.Option("--only", help="comma separated screen names to confirm (default: all)")] = "",
+) -> None:
+    """人看过之后清掉 AUTO 标记——之后 report 不再提示“未确认”。"""
+    from ecat.uiflow.spec import UiflowSpec
+
+    if not spec.exists():
+        console.print(f"[red]spec not found: {spec}[/red]")
+        raise typer.Exit(1)
+    spec_obj = UiflowSpec.load(spec)
+    wanted = {s.strip() for s in only.split(",") if s.strip()}
+    confirmed = 0
+    for row in spec_obj.screens:
+        if row.auto and (not wanted or row.screen in wanted):
+            row.auto = False
+            row.note = row.note.replace("AUTO 候选", "确认")
+            confirmed += 1
+    path = spec_obj.save(spec)
+    console.print(
+        f"[green]confirmed {confirmed} row(s)[/green] · 剩余未确认 {len(spec_obj.unconfirmed())} -> {path}"
+    )
+
+
+@uiflow_app.command("audit-flows")
+def uiflow_audit_flows(
+    flows: Annotated[Path, typer.Option("--flows", help="flow spec to audit")],
+    out: Annotated[Path, typer.Option("--out", help="audit JSON (a .md sits next to it)")] = Path(
+        "reports/ui-flow/flow-audit.json"
+    ),
+    report: Annotated[Path | None, typer.Option("--report", help="optional T2 report to cross-check")] = None,
+) -> None:
+    """审计 flow：哪些永远绿、哪些随数据漂、哪些没记证据（不碰设备）。"""
+    from ecat.uiflow.audit import audit_flows, load_spec
+
+    if not flows.exists():
+        console.print(f"[red]spec not found: {flows}[/red]")
+        raise typer.Exit(1)
+    try:
+        result = audit_flows(load_spec(flows), load_spec(report) if report else None)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    path = result.save(out)
+    for finding in result.sorted_findings():
+        colour = {"high": "red", "medium": "yellow", "low": "dim"}[finding.severity]
+        console.print(f"  [{colour}]{finding.severity:6s}[/{colour}] {finding.flow:24s} {finding.check}")
+        console.print(f"          {finding.detail}")
+    console.print(
+        f"[{'green' if result.ok else 'red'}]{'audit passed' if result.ok else 'high-severity findings'}[/{'green' if result.ok else 'red'}]"
+        f" · flows={result.flows} {result.by_severity} -> {path}"
+    )
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+@uiflow_app.command("check-port")
+def uiflow_check_port(
+    spec: Annotated[Path, typer.Option("--spec", help="spec file whose port.screen names are checked")],
+    port_dir: Annotated[Path, typer.Option("--port-dir", help="OpenHarmony project root")],
+    out: Annotated[Path, typer.Option("--out", help="check JSON (a .md sits next to it)")] = Path(
+        "reports/ui-flow/port-check.json"
+    ),
+) -> None:
+    """校验 spec 的屏名在端口真实存在（main_pages.json + loadContent，不碰设备）。"""
+    from ecat.uiflow.portcheck import check_spec
+    from ecat.uiflow.spec import UiflowSpec
+
+    if not spec.exists():
+        console.print(f"[red]spec not found: {spec}[/red]")
+        raise typer.Exit(1)
+    if not port_dir.exists():
+        console.print(f"[red]port dir not found: {port_dir}[/red]")
+        raise typer.Exit(1)
+    result = check_spec(UiflowSpec.load(spec), port_dir)
+    path = result.save(out)
+    for finding in result.sorted_findings():
+        colour = {"error": "red", "warning": "yellow", "info": "dim"}[finding.severity]
+        console.print(f"  [{colour}]{finding.severity:7s}[/{colour}] {finding.check:18s} {finding.detail}")
+    console.print(
+        f"[{'green' if not result.errors else 'red'}]"
+        f"{'port check passed' if not result.errors else f'{len(result.errors)} error(s)'}[/]"
+        f" · registered={len(result.pages.registered)} entry={result.pages.entry} -> {path}"
+    )
+    if result.errors:
+        raise typer.Exit(1)
+
+
+@uiflow_app.command("report")
+def uiflow_report(
+    base: Annotated[Path, typer.Option("--base", help="Layer B graph (denominator)")],
+    port_report: Annotated[Path, typer.Option("--port-report", help="T2 ui_runner report (source of C)")],
+    spec: Annotated[Path, typer.Option("--spec", help="spec file (the join key)")],
+    out: Annotated[Path, typer.Option("--out", help="verdict JSON (a .md sits next to it)")] = Path(
+        "reports/ui-flow/verdict.json"
+    ),
+    flows: Annotated[Path | None, typer.Option("--flows", help="flow spec, enables the flow audit")] = None,
+    port_dir: Annotated[Path | None, typer.Option("--port-dir", help="harmony project, enables port check")] = None,
+    bundle: Annotated[str, typer.Option("--bundle", help="bundle name, for the header")] = "",
+    history_dir: Annotated[
+        Path, typer.Option("--history-dir", help="where per-bundle verdict history is appended")
+    ] = Path("reports/ui-flow/history"),
+    no_history: Annotated[bool, typer.Option("--no-history", help="do not record this run")] = False,
+) -> None:
+    """一条命令出验收结论：port check + flow audit + C 覆盖 + FN + 与上一版对比，单一退出码。"""
+    from ecat.uiflow.verdict import BLOCKED, PASS, build_verdict
+
+    for label, path in (("base", base), ("port-report", port_report), ("spec", spec)):
+        if not path.exists():
+            console.print(f"[red]{label} not found: {path}[/red]")
+            raise typer.Exit(2)
+    for label, path in (("flows", flows), ("port-dir", port_dir)):
+        if path is not None and not path.exists():
+            console.print(f"[red]{label} not found: {path}[/red]")
+            raise typer.Exit(2)
+
+    try:
+        verdict = build_verdict(base=base, port_report=port_report, spec=spec,
+                                flows=flows, port_dir=port_dir, bundle=bundle,
+                                history_dir=None if no_history else history_dir)
+    except (ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]cannot build a verdict: {exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    verdict.artifacts = {
+        "base (B)": str(base),
+        "port report (C source)": str(port_report),
+        "spec": str(spec),
+        **({"flows": str(flows)} if flows else {}),
+        **({"port dir": str(port_dir)} if port_dir else {}),
+        "verdict": str(out),
+        **({} if no_history else {"history": str(history_dir)}),
+    }
+    path = verdict.save(out)
+    colour = "green" if verdict.status == PASS else ("yellow" if verdict.status == BLOCKED else "red")
+    for check in verdict.checks:
+        tick = {"pass": "green", "fail": "red", "blocked": "yellow", "warn": "yellow", "skip": "dim"}.get(
+            check.status, "dim"
+        )
+        console.print(f"  [{tick}]{check.status:7s}[/{tick}] {check.name:14s} {check.detail}")
+    if verdict.fn_rate is not None:
+        console.print(f"[{colour}]{verdict.status}[/{colour}] · [bold]FN={verdict.fn_rate:.1%}[/bold] -> {path} (+ .md)")
+    else:
+        console.print(f"[{colour}]{verdict.status}[/{colour}] · FN 未出数 -> {path} (+ .md)")
+    for reason in verdict.reasons:
+        console.print(f"  [yellow]![/yellow] {reason}")
+    if verdict.history:
+        if verdict.history.get("first_run"):
+            console.print("  [dim]history: 首次记录，没有可比基线[/dim]")
+        else:
+            word = verdict.history.get("verdict")
+            colour_h = "red" if word == "regression" else ("green" if word == "fixed" else "dim")
+            console.print(f"  [{colour_h}]history: {word}[/{colour_h}] " +
+                          "; ".join(verdict.history.get("changes") or ["无变化"]))
+    raise typer.Exit(verdict.exit_code)
+
+
+@uiflow_app.command("history")
+def uiflow_history(
+    bundle: Annotated[str, typer.Option("--bundle", help="bundle name")],
+    history_dir: Annotated[Path, typer.Option("--history-dir")] = Path("reports/ui-flow/history"),
+    limit: Annotated[int, typer.Option("--limit", help="how many runs to show")] = 10,
+) -> None:
+    """列出某个包历次验收：状态、FN、缺失页。"""
+    from ecat.uiflow.history import read_history
+
+    entries = read_history(history_dir, bundle)
+    if not entries:
+        console.print(f"[dim]no history for {bundle} under {history_dir}[/dim]")
+        return
+    for entry in entries[-limit:]:
+        fn = "未出数" if entry.fn_rate is None else f"{entry.fn_rate:.1%}"
+        console.print(
+            f"  {entry.generated:20s} v{entry.version or '?':10s} {entry.status:8s} FN={fn:8s} "
+            f"pages={entry.port_pages} missing={len(entry.missing_pages)} dead={len(entry.dead_pages)}"
+        )
 
 
 @uiflow_app.command("diff")
@@ -673,6 +938,15 @@ def uiflow_diff(
     mapping: Annotated[Path | None, typer.Option("--mapping", help="base->port page mapping JSON")] = None,
     out: Annotated[Path, typer.Option("--out", help="output diff JSON")] = Path("reports/ui-flow/diff.json"),
     force: Annotated[bool, typer.Option("--force", help="allow an amstart graph as denominator")] = False,
+    spec: Annotated[Path | None, typer.Option("--spec", help="spec file: per-screen two columns, no name matching")] = None,
+    port_dir: Annotated[
+        Path | None,
+        typer.Option("--port-dir", help="validate spec screen names against the port's page registry first"),
+    ] = None,
+    allow_degraded: Annotated[
+        bool,
+        typer.Option("--allow-degraded", help="print an FN number even when flows were blocked by a failed dependency"),
+    ] = False,
 ) -> None:
     """验收 — diff(B, C)，算 FN 率（A 不能当分母）。"""
     import json as _json
@@ -684,6 +958,68 @@ def uiflow_diff(
         if not p.exists():
             console.print(f"[red]graph not found: {p}[/red]")
             raise typer.Exit(1)
+    if spec is not None and port_dir is not None:
+        from ecat.uiflow.portcheck import check_spec
+        from ecat.uiflow.spec import UiflowSpec as _UiflowSpec
+
+        check = check_spec(_UiflowSpec.load(spec), port_dir)
+        for finding in check.errors:
+            console.print(f"[red]spec screen does not exist:[/red] {finding.detail}")
+        if check.errors:
+            console.print(
+                "[red]refusing to diff[/red] — a spec that names screens the port does not ship "
+                "turns a typo into a missing-page number. Fix the spec (or drop --port-dir)."
+            )
+            raise typer.Exit(2)
+        if check.findings:
+            console.print(f"[dim]port check: {check.to_dict()['by_severity']} (no blocking errors)[/dim]")
+
+    degraded = _degraded_notes(port)
+    if degraded and not allow_degraded:
+        console.print("[yellow]port graph is degraded:[/yellow] " + "; ".join(degraded))
+        console.print(
+            "[red]refusing to report an FN number[/red] — flows that never ran cannot prove a screen "
+            "is missing, so FN would be overstated. Re-run the seed (or pass --allow-degraded)."
+        )
+        raise typer.Exit(4)
+
+    if spec is not None:
+        from ecat.uiflow.spec import UiflowSpec, diff_against_spec
+
+        if not spec.exists():
+            console.print(f"[red]spec not found: {spec}[/red]")
+            raise typer.Exit(1)
+        try:
+            result_spec = diff_against_spec(PageGraph.load(base), PageGraph.load(port), UiflowSpec.load(spec))
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from exc
+        path = result_spec.save(out)
+        if not result_spec.valid:
+            console.print(f"[red]refusing to report an FN number: {result_spec.invalid_reason}[/red]")
+            console.print(f"[yellow]artifact kept for inspection: {path}[/yellow]")
+            raise typer.Exit(2)
+        if result_spec.state_fn_rate is not None:
+            miss_states = [f"{r.screen}/{r.state}" for r in result_spec.states_missing]
+            console.print(
+                f"状态 {result_spec.states_total - len(miss_states)}/{result_spec.states_total}"
+                f" · 状态 FN={result_spec.state_fn_rate:.1%}"
+                + (f" · 缺 {', '.join(miss_states[:4])}" if miss_states else "")
+            )
+        console.print(
+            f"spec 屏 {len(result_spec.rows)} · Android 到达 {result_spec.android_reached}/{result_spec.android_pages}"
+            f"（覆盖 {result_spec.spec_coverage:.1%}）· 端口 {len(result_spec.present)}/{result_spec.port_pages}"
+            f" · [bold]FN={result_spec.fn_rate:.1%}[/bold]"
+        )
+        for row in result_spec.missing:
+            console.print(f"  [red]missing[/red] {row.screen}")
+        if result_spec.unlisted_android:
+            console.print(f"  [yellow]{len(result_spec.unlisted_android)} Android page(s) not in spec[/yellow]")
+        for warning in result_spec.warnings:
+            console.print(f"  [yellow]![/yellow] {warning}")
+        console.print(f"[green]diff -> {path}[/green] (+ .md)")
+        return
+
     mapping_data = _json.loads(mapping.read_text(encoding="utf-8")) if mapping else None
     try:
         result = diff_graphs(PageGraph.load(base), PageGraph.load(port), mapping=mapping_data, force=force)
@@ -692,6 +1028,10 @@ def uiflow_diff(
         raise typer.Exit(2) from exc
 
     path = result.save(out)
+    if not result.valid:
+        console.print(f"[red]refusing to report an FN number: {result.invalid_reason}[/red]")
+        console.print(f"[yellow]artifact kept for inspection: {path}[/yellow]")
+        raise typer.Exit(2)
     console.print(
         f"B={result.base_count} C={result.port_count} matched={len(result.matched)} "
         f"missing={len(result.missing)} extra={len(result.extra)} "
@@ -705,6 +1045,23 @@ def uiflow_diff(
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+
+def _degraded_notes(graph_path: Path) -> list[str]:
+    """Why this port graph cannot support a headline FN number."""
+    from ecat.uiflow.models import PageGraph
+
+    try:
+        stats = PageGraph.load(graph_path).stats or {}
+    except Exception:  # noqa: BLE001 - a broken graph is diff's problem, not this guard's
+        return []
+    notes: list[str] = []
+    blocked = int(stats.get("dependency_skips") or 0)
+    if blocked:
+        notes.append(f"{blocked} flow(s) blocked by a failed dependency (never ran)")
+    if int(stats.get("pass") or 0) == 0:
+        notes.append("no flow passed")
+    return notes
 
 
 def _attach_file_log(log_path: Path) -> None:
