@@ -9,7 +9,17 @@ reports three things:
 * **unknown screen**  the spec names a port screen that is not registered (typo → FN noise)
 * **entry uncovered** the page the ability loads on start is never asserted by a flow
 * **orphan page**     a registered page that nothing navigates to (neither the entry page nor
-                      any `router.pushUrl`), i.e. dead surface the user can never reach
+                      any route), i.e. dead surface the user can never reach
+
+Two routing models are understood, because generated ports use both:
+
+* **router**      one `.ets` per screen, `main_pages.json` lists them, `router.pushUrl('pages/X')`
+* **navigation**  one registered page, screens reached by `NavPathStack.pushPathByName(PAGE_X)`
+                  where `PAGE_X` is a constant (`export const PAGE_X: string = 'MediaActivity'`)
+
+When neither model can be parsed the screen-name check **downgrades to a warning** instead of
+blocking: refusing to diff a port whose routing we merely failed to read would be worse than the
+typo it is meant to catch.
 
 Read-only: parses source, never launches anything.
 """
@@ -25,6 +35,13 @@ from typing import Any
 LOAD_CONTENT = re.compile(r"loadContent\(\s*['\"]([^'\"]+)['\"]")
 PUSH_URL = re.compile(r"(?:router\.)?pushUrl\(\s*\{[^}]*?url\s*:\s*['\"]([^'\"]+)['\"]", re.S)
 PUSH_URL_SIMPLE = re.compile(r"pushUrl\(\s*['\"]([^'\"]+)['\"]")
+#: `export const PAGE_MEDIA: string = 'MediaActivity'`
+STRING_CONST = re.compile(
+    r"export\s+const\s+([A-Za-z_$][\w$]*)\s*(?::\s*string\s*)?=\s*['\"]([^'\"]+)['\"]"
+)
+#: `pushPathByName(PAGE_MEDIA, …)` / `pushPathByName('MediaActivity', …)`
+PUSH_PATH = re.compile(r"pushPath(?:ByName)?\(\s*([A-Za-z_$][\w$]*|['\"][^'\"]+['\"])")
+NAV_USAGE = re.compile(r"\bNavPathStack\b|\bpushPathByName\(|\bpushPath\(")
 
 SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
 
@@ -43,16 +60,30 @@ class PortPages:
     registered: list[str] = field(default_factory=list)  # page stems, e.g. ['Garden', 'Index']
     entry: str | None = None                             # page stem the ability loads
     sources: list[str] = field(default_factory=list)
+    #: screens reached by `router.pushUrl(...)` (model "router")
+    router_targets: list[str] = field(default_factory=list)
+    #: screens reached by `pushPathByName(CONST)` (model "navigation")
+    nav_targets: list[str] = field(default_factory=list)
+    #: "router" | "navigation" | "unknown" — what the routing code actually looks like
+    model: str = "unknown"
 
     @property
     def ok(self) -> bool:
         return bool(self.registered)
+
+    @property
+    def known_screens(self) -> set[str]:
+        """Every screen name the port demonstrably has, whatever routing model it uses."""
+        return set(self.registered) | set(self.router_targets) | set(self.nav_targets)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "root": str(self.root) if self.root else None,
             "registered": self.registered,
             "entry": self.entry,
+            "model": self.model,
+            "router_targets": self.router_targets,
+            "nav_targets": self.nav_targets,
             "sources": self.sources,
         }
 
@@ -95,7 +126,8 @@ class PortCheck:
         lines = [
             "# Port check — spec 里的屏名对得上端口吗",
             "",
-            f"- 注册页 {len(self.pages.registered)}：{', '.join(self.pages.registered) or '（没读到）'}",
+            f"- 路由模型：`{self.pages.model}` · 已知屏 {len(self.pages.known_screens)}："
+            f"{', '.join(sorted(self.pages.known_screens)) or '（没读到）'}",
             f"- 启动页：`{self.pages.entry or '（没读到）'}`",
             f"- 结论：{'通过' if not self.errors else f'{len(self.errors)} 个错误——spec 里有端口不存在的屏名'}",
             "",
@@ -122,6 +154,21 @@ def _find_main_pages(root: Path) -> Path | None:
     return hits[0] if hits else None
 
 
+def _ets_dir(root: Path) -> Path | None:
+    """Where the ArkTS sources live.
+
+    `entry/src/main/ets` is the DevEco layout; exports and snapshots often keep only `ets/`.
+    Guessing wrong here made the whole check silently degrade to "unknown routing model".
+    """
+    for candidate in (root / "entry/src/main/ets", root / "ets", root / "src/main/ets"):
+        if candidate.is_dir() and any(candidate.rglob("*.ets")):
+            return candidate
+    for candidate in sorted(root.glob("**/ets")):
+        if candidate.is_dir() and any(candidate.rglob("*.ets")):
+            return candidate
+    return None
+
+
 def _read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="ignore")
@@ -144,20 +191,54 @@ def read_port_pages(port_dir: Path | str) -> PortPages:
             pages.registered = [_page_stem(str(s)) for s in src if str(s).strip()]
             pages.sources.append(str(main))
 
-    for ets in sorted((root / "entry/src/main/ets").glob("**/*.ets")) if (root / "entry/src/main/ets").exists() else []:
+    ets_dir = _ets_dir(root)
+    files = sorted(ets_dir.glob("**/*.ets")) if ets_dir is not None else []
+
+    constants: dict[str, str] = {}
+    router_targets: set[str] = set()
+    nav_targets: set[str] = set()
+    nav_seen = False
+
+    for ets in files:
         text = _read_text(ets)
-        hit = LOAD_CONTENT.search(text)
-        if hit:
-            pages.entry = _page_stem(hit.group(1))
-            pages.sources.append(str(ets))
-            break
+        if pages.entry is None:
+            hit = LOAD_CONTENT.search(text)
+            if hit:
+                pages.entry = _page_stem(hit.group(1))
+                pages.sources.append(str(ets))
+
+        for match in STRING_CONST.finditer(text):
+            constants[match.group(1)] = _page_stem(match.group(2))
+
+        for match in PUSH_URL.finditer(text):
+            router_targets.add(_page_stem(match.group(1)))
+        for match in PUSH_URL_SIMPLE.finditer(text):
+            router_targets.add(_page_stem(match.group(1)))
+
+        if NAV_USAGE.search(text):
+            nav_seen = True
+        for match in PUSH_PATH.finditer(text):
+            arg = match.group(1).strip()
+            if arg[:1] in {"'", '"'}:
+                nav_targets.add(_page_stem(arg.strip("'\"")))
+            elif arg in constants:
+                nav_targets.add(constants[arg])
+
+    pages.router_targets = sorted(router_targets)
+    pages.nav_targets = sorted(nav_targets - {pages.entry} if pages.entry else nav_targets)
+    if nav_seen or nav_targets:
+        pages.model = "navigation"
+    elif router_targets:
+        pages.model = "router"
+    else:
+        pages.model = "unknown"
     return pages
 
 
 def _navigated_pages(root: Path) -> set[str]:
     found: set[str] = set()
-    ets_dir = root / "entry/src/main/ets"
-    if not ets_dir.exists():
+    ets_dir = _ets_dir(root)
+    if ets_dir is None:
         return found
     for ets in sorted(ets_dir.glob("**/*.ets")):
         text = _read_text(ets)
@@ -187,7 +268,8 @@ def check_spec(spec: Any, port_dir: Path | str) -> PortCheck:
         ))
         return result
 
-    registered = set(pages.registered)
+    known = pages.known_screens
+    blocking = pages.model != "unknown"
     declared: dict[str, str] = {}
     for entry in screens:
         if not isinstance(entry, dict):
@@ -203,10 +285,11 @@ def check_spec(spec: Any, port_dir: Path | str) -> PortCheck:
             continue
         stem = _page_stem(port_screen)
         declared[stem] = name
-        if stem not in registered:
+        if stem not in known:
             result.findings.append(PortFinding(
-                "unknown_screen", "error",
-                f"spec 写了 `{port_screen}`，但端口只注册了 {sorted(registered)}",
+                "unknown_screen" if blocking else "unknown_screen_unverified",
+                "error" if blocking else "warning",
+                f"spec 写了 `{port_screen}`，端口的屏是 {sorted(known)}（模型：{pages.model}）",
                 "改 spec 里的屏名（或这是端口真的少了这一页——先确认再改）", screen=port_screen,
             ))
 
@@ -217,16 +300,25 @@ def check_spec(spec: Any, port_dir: Path | str) -> PortCheck:
             "至少一条 flow 从启动页开始并断言它上面的关键文案", screen=f"{pages.entry}.ets",
         ))
 
-    for stem in pages.registered:
+    for stem in sorted(known):
         if stem not in declared:
             result.findings.append(PortFinding(
                 "port_page_uncovered", "info",
-                f"端口注册了 `{stem}`，但 spec 里没有一行指向它——要么这页没测，要么配对被别的屏抢走了",
+                f"端口有 `{stem}`，但 spec 里没有一行指向它——要么这页没测，要么配对被别的屏抢走了",
                 "确认后补一行 spec，或删掉这页（真死页）", screen=f"{stem}.ets",
             ))
 
-    if (port_dir_path := Path(port_dir)).exists():
-        navigated = _navigated_pages(port_dir_path)
+    if pages.model == "unknown":
+        result.findings.append(PortFinding(
+            "routing_unknown", "warning",
+            "没识别出端口的路由写法（既没有 router.pushUrl，也没有 NavPathStack.pushPathByName）"
+            "——屏名校验只作提示，不阻断",
+            "如果是生成器的新写法，请扩展 portcheck 的解析（别把闸门绕过去）",
+        ))
+        return result
+
+    if Path(port_dir).exists():
+        navigated = set(pages.router_targets) | set(pages.nav_targets)
         for stem in pages.registered:
             if stem == pages.entry or stem in navigated or stem in declared:
                 continue

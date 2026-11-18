@@ -327,13 +327,26 @@ then expects `Apple` to be on screen.
     ecat uiflow check-port --spec <spec.json> --port-dir <harmony project> --out reports/ui-flow/port-check.json
     ecat uiflow diff ... --spec <spec.json> --port-dir <harmony project>   # gate before diffing
 
-Reads `main_pages.json`, the entry ability's `loadContent` and every `router.pushUrl`; no device.
+Reads `main_pages.json`, the entry ability's `loadContent`, and the routing code; no device. Two
+models are understood, because generated ports use both:
+
+| model | shape | screens come from |
+|---|---|---|
+| `router` | one `.ets` per screen | `main_pages.json` + `router.pushUrl('pages/X')` |
+| `navigation` | one registered page, `NavPathStack` destinations | `pushPathByName(PAGE_X, …)` resolved through `export const PAGE_X: string = 'X'` |
+| `unknown` | anything else | nothing — the check degrades to warnings and says so |
+
+Source discovery also tolerates non-DevEco layouts (`ets/` at the root, as exports and snapshots
+have). Guessing the source path wrong used to make every port look like `unknown`, which is how the
+gate quietly stopped protecting anything.
 `diff --port-dir` **refuses to run (exit 2)** when the spec names a page that is not registered —
 a typo would otherwise be reported as a page the port is missing.
 
 | check | severity | meaning |
 |---|---|---|
-| `unknown_screen` | error | spec's `port.screen` is not in `main_pages.json` |
+| `unknown_screen` | error | spec's `port.screen` is not a screen the port has (see routing models below) |
+| `unknown_screen_unverified` | warning | same, but the routing model could not be parsed — does **not** block |
+| `routing_unknown` | warning | neither `router.pushUrl` nor `NavPathStack.pushPathByName` found |
 | `port_screen_missing` | error | spec row has no `port.screen` at all |
 | `entry_uncovered` | warning | the page the ability loads on start is never asserted |
 | `orphan_page` | info | a registered page that neither `loadContent` nor any `pushUrl` reaches — dead surface FN can never see |

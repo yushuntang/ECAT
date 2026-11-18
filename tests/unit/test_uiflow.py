@@ -371,6 +371,9 @@ def _verdict_fixtures(tmp_path, *, port_screen="Garden.ets", flows_steps=None, p
     ets = tmp_path / "entry/src/main/ets/entryability"
     ets.mkdir(parents=True)
     (ets / "EntryAbility.ets").write_text("windowStage.loadContent('pages/Garden');", encoding="utf-8")
+    # give the port a router route so the check runs in blocking mode
+    (ets.parent / "Garden.ets").write_text(
+        "router.pushUrl({ url: 'pages/PlantDetail' });", encoding="utf-8")
     return base_path, report_path, spec_path, flows_path, tmp_path
 
 
@@ -462,7 +465,8 @@ def test_degraded_graph_blocks_the_headline_number(tmp_path) -> None:
 
 
 # ── port check: a spec may name screens the port does not ship ───────────────
-def _port_tree(tmp_path, pages, entry="pages/Garden", pushes=()):
+def _port_tree(tmp_path, pages, entry="pages/Garden", pushes=(("Garden", "PlantDetail"),)):
+    """A port that uses the router model: main_pages + literal pushUrl."""
     prof = tmp_path / "entry/src/main/resources/base/profile"
     prof.mkdir(parents=True)
     (prof / "main_pages.json").write_text(json.dumps({"src": list(pages)}), encoding="utf-8")
@@ -474,6 +478,26 @@ def _port_tree(tmp_path, pages, entry="pages/Garden", pushes=()):
         (ets / f"pages/{name}.ets").parent.mkdir(parents=True, exist_ok=True)
         (ets / f"pages/{name}.ets").write_text(
             f"router.pushUrl({{ url: 'pages/{target}', params: {{}} }});", encoding="utf-8")
+    return tmp_path
+
+
+def _nav_port_tree(tmp_path, registered=("pages/Index",), entry="pages/Index"):
+    """A port the way ECAT generates it: one registered page, screens via NavPathStack constants."""
+    prof = tmp_path / "entry/src/main/resources/base/profile"
+    prof.mkdir(parents=True)
+    (prof / "main_pages.json").write_text(json.dumps({"src": list(registered)}), encoding="utf-8")
+    ets = tmp_path / "entry/src/main/ets"
+    (ets / "entryability").mkdir(parents=True)
+    (ets / "common").mkdir(parents=True, exist_ok=True)
+    (ets / "entryability/EntryAbility.ets").write_text(
+        f"windowStage.loadContent('{entry}', (err) => {{}});", encoding="utf-8")
+    (ets / "common/Constants.ets").write_text(
+        "export const PAGE_MEDIA: string = 'MediaActivity';\n"
+        "export const PAGE_VIEWER: string = 'ViewerActivity';\n", encoding="utf-8")
+    (ets / "MainActivity.ets").write_text(
+        "pageStack: NavPathStack = new NavPathStack();\n"
+        "this.pageStack.pushPathByName(PAGE_MEDIA, param);\n"
+        "this.pageStack.pushPathByName('SettingsActivity', {});\n", encoding="utf-8")
     return tmp_path
 
 
@@ -502,6 +526,64 @@ def test_port_check_exposes_a_registered_page_nothing_navigates_to(tmp_path) -> 
     res = check_spec(_spec_payload(("garden", "Garden.ets"), ("detail", "PlantDetail.ets")), root)
     orphans = [f.screen for f in res.findings if f.check == "orphan_page"]
     assert orphans == ["Index.ets"], "registered, no loadContent, no pushUrl -> unreachable"
+
+
+def test_navigation_port_does_not_report_its_screens_as_missing(tmp_path) -> None:
+    """ECAT-generated ports use NavPathStack: one registered page, screens named by constants."""
+    from ecat.uiflow.portcheck import check_spec
+
+    root = _nav_port_tree(tmp_path)
+    res = check_spec(_spec_payload(("gallery", "Index.ets"), ("media", "MediaActivity.ets"),
+                                   ("settings", "SettingsActivity.ets")), root)
+    assert res.pages.model == "navigation"
+    assert {"MediaActivity", "SettingsActivity"} <= res.pages.known_screens
+    assert not res.errors, [f.detail for f in res.errors]
+    assert "MediaActivity" in res.pages.nav_targets, "the constant was resolved to its value"
+    assert "ViewerActivity" not in res.pages.nav_targets, "declared but never pushed: not a route"
+
+
+def test_export_layout_finds_sources_under_ets_without_entry_prefix(tmp_path) -> None:
+    """Snapshots keep only `ets/` — guessing the DevEco path made the whole check say 'unknown'."""
+    from ecat.uiflow.portcheck import check_spec
+
+    ets = tmp_path / "ets"
+    (ets / "common").mkdir(parents=True)
+    prof = tmp_path / "resources/base/profile"
+    prof.mkdir(parents=True)
+    (prof / "main_pages.json").write_text(json.dumps({"src": ["pages/Index"]}), encoding="utf-8")
+    (ets / "entryability").mkdir(parents=True)
+    (ets / "entryability/EntryAbility.ets").write_text("windowStage.loadContent('pages/Index');",
+                                                      encoding="utf-8")
+    (ets / "common/Constants.ets").write_text(
+        "export const PAGE_MEDIA: string = 'MediaActivity';", encoding="utf-8")
+    (ets / "MainActivity.ets").write_text(
+        "this.pageStack.pushPathByName(PAGE_MEDIA, param);", encoding="utf-8")
+
+    res = check_spec(_spec_payload(("main", "Index.ets"), ("media", "MediaActivity.ets")), tmp_path)
+    assert res.pages.model == "navigation"
+    assert res.pages.entry == "Index"
+    assert "MediaActivity" in res.pages.known_screens
+    assert not res.errors
+
+
+def test_unknown_routing_model_downgrades_the_gate_to_a_warning(tmp_path) -> None:
+    from ecat.uiflow.portcheck import check_spec
+
+    root = _port_tree(tmp_path, ["pages/Garden"], pushes=())  # no pushUrl anywhere
+    res = check_spec(_spec_payload(("garden", "Garden.ets"), ("ghost", "Ghost.ets")), root)
+    assert res.pages.model == "unknown"
+    assert not res.errors, "an unparsed routing model must not block the diff"
+    assert [f.check for f in res.findings if f.severity == "warning"] and any(
+        f.check == "unknown_screen_unverified" for f in res.findings)
+
+
+def test_router_port_still_blocks_a_screen_that_does_not_exist(tmp_path) -> None:
+    from ecat.uiflow.portcheck import check_spec
+
+    root = _port_tree(tmp_path, ["pages/Garden", "pages/PlantDetail"])
+    res = check_spec(_spec_payload(("garden", "Garden.ets"), ("ghost", "Ghost.ets")), root)
+    assert res.pages.model == "router"
+    assert [f.screen for f in res.errors] == ["Ghost.ets"]
 
 
 def test_port_check_warns_when_the_entry_page_is_never_asserted(tmp_path) -> None:
