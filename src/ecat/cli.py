@@ -581,6 +581,9 @@ def uiflow_discover(
         "reports/ui-flow/baselines"
     ),
     refresh: Annotated[bool, typer.Option("--refresh", help="explore again even if a baseline exists for this build")] = False,
+    allow_sha_mismatch: Annotated[
+        bool, typer.Option("--allow-sha-mismatch", help="accept a UTG that was explored from another APK build")
+    ] = False,
 ) -> None:
     """Layer B（发现）— 用 DroidBot 自动遍历；同一个 APK sha 默认复用已固定的基线。"""
     import json as _json
@@ -609,6 +612,18 @@ def uiflow_discover(
                 raise typer.Exit(1)
             framework = parse_utg(from_utg)
             out_dir, mode = str(from_utg.parent), "imported"
+            utgs_sha = str(framework.get("app_sha256") or "")
+            if apk is not None and apk.exists() and utgs_sha:
+                cur_sha = file_sha256(apk)
+                if utgs_sha != cur_sha and not allow_sha_mismatch:
+                    console.print(
+                        f"[red]this UTG was explored from build {utgs_sha[:12]}…, not {cur_sha[:12]}…[/red]\n"
+                        "[yellow]Layer B is a baseline: a stale one silently changes the FN denominator.[/yellow] "
+                        "Re-explore, or pass --allow-sha-mismatch if you know the UI is unchanged."
+                    )
+                    raise typer.Exit(2)
+                if utgs_sha != cur_sha:
+                    console.print("[yellow]sha mismatch allowed: denominator may not describe this build[/yellow]")
             console.print(f"[yellow]imported existing UTG {from_utg}[/yellow]")
         else:
             if apk is None or not apk.exists():
@@ -783,15 +798,29 @@ def uiflow_audit_flows(
         "reports/ui-flow/flow-audit.json"
     ),
     report: Annotated[Path | None, typer.Option("--report", help="optional T2 report to cross-check")] = None,
+    screen_spec: Annotated[
+        Path | None,
+        typer.Option("--screen-spec", help="spec file: also check that every declared state is proven by a flow step"),
+    ] = None,
 ) -> None:
     """审计 flow：哪些永远绿、哪些随数据漂、哪些没记证据（不碰设备）。"""
-    from ecat.uiflow.audit import audit_flows, load_spec
+    from ecat.uiflow.audit import audit_flows, audit_states, load_spec
 
     if not flows.exists():
         console.print(f"[red]spec not found: {flows}[/red]")
         raise typer.Exit(1)
     try:
-        result = audit_flows(load_spec(flows), load_spec(report) if report else None)
+        flow_payload = load_spec(flows)
+        result = audit_flows(flow_payload, load_spec(report) if report else None)
+        if screen_spec is not None:
+            from ecat.uiflow.spec import UiflowSpec
+
+            if not screen_spec.exists():
+                console.print(f"[red]screen spec not found: {screen_spec}[/red]")
+                raise typer.Exit(1)
+            # load through the spec class so a malformed file fails here instead of auditing nothing
+            extra = audit_states(UiflowSpec.load(screen_spec), flow_payload)
+            result.findings.extend(extra.get("states") or [])
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(2) from exc
@@ -947,6 +976,9 @@ def uiflow_diff(
         bool,
         typer.Option("--allow-degraded", help="print an FN number even when flows were blocked by a failed dependency"),
     ] = False,
+    apk: Annotated[
+        Path | None, typer.Option("--apk", help="APK the denominator should describe; warns if the B graph disagrees")
+    ] = None,
 ) -> None:
     """验收 — diff(B, C)，算 FN 率（A 不能当分母）。"""
     import json as _json
@@ -973,6 +1005,18 @@ def uiflow_diff(
             raise typer.Exit(2)
         if check.findings:
             console.print(f"[dim]port check: {check.to_dict()['by_severity']} (no blocking errors)[/dim]")
+
+    if apk is not None and apk.exists():
+        from ecat.uiflow.discover import file_sha256
+
+        base_graph = PageGraph.load(base)
+        base_sha = str((base_graph.stats or {}).get("app_sha256") or "")
+        apk_sha = file_sha256(apk)
+        if base_sha and base_sha != apk_sha:
+            console.print(
+                f"[yellow]![/yellow] B 图来自 {base_sha[:12]}…，手上的 APK 是 {apk_sha[:12]}… "
+                "——分母可能描述的不是这个构建"
+            )
 
     degraded = _degraded_notes(port)
     if degraded and not allow_degraded:

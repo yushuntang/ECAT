@@ -4,8 +4,9 @@ What this layer *claims*: the page exists in the build, it can be entered with a
 explicit intent, and it renders. It does **not** claim a user can reach it — that
 is Layer B's job, and the FN denominator always comes from B.
 
-The activity list is read from the APK manifest (aapt2/aapt xmltree), so it is the
-machine's registration table, not a hand-written page model. Aliases are collapsed
+The activity list is read from the APK manifest (aapt2/aapt xmltree, or apkanalyzer, or
+androguard when build-tools are absent), so it is the machine's registration table, not a
+hand-written page model.
 into their target activity; library activities stay in the list on purpose (they
 are pages that exist, even if they are not product flow).
 """
@@ -15,6 +16,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -70,8 +72,103 @@ _NAME_RE = re.compile(r'android:name\((?:0x[0-9a-f]+)\)="([^"]+)"')
 _EXPORTED_RE = re.compile(r'android:exported\((?:0x[0-9a-f]+)\)=(?:\(type 0x12\))?(?:0x([0-9a-f]+)|(true|false))')
 
 
+def apkanalyzer_bin() -> str:
+    """`apkanalyzer` from cmdline-tools — no build-tools needed, unlike aapt."""
+    import shutil
+
+    for name in ("apkanalyzer", "apkanalyzer.bat"):
+        found = shutil.which(name)
+        if found:
+            return found
+    roots = [
+        os.environ.get("ANDROID_HOME", ""),
+        os.environ.get("ANDROID_SDK_ROOT", ""),
+        str(Path(os.environ.get("LOCALAPPDATA", "")) / "Android" / "Sdk"),
+    ]
+    for root in roots:
+        if not root:
+            continue
+        for cand in sorted((Path(root) / "cmdline-tools").glob("*/bin/apkanalyzer*")):
+            if cand.is_file():
+                return str(cand)
+    raise ToolsMissing("apkanalyzer not found — install cmdline-tools or set ANDROID_HOME")
+
+
+def activities_from_xml(xml_text: str) -> tuple[str, list[dict[str, Any]]]:
+    """(package, activities) from a *decoded* AndroidManifest.xml (apkanalyzer / androguard).
+
+    This is the dependency-free fallback for machines without build-tools: the manifest is plain
+    XML once something else has decoded it, so ElementTree is enough.
+    """
+    xml_text = xml_text.strip()
+    if not xml_text.startswith("<?xml") and "<manifest" not in xml_text:
+        raise ToolsMissing("manifest text is not XML — cannot parse")
+    root = ET.fromstring(xml_text)
+    pkg = root.get("package", "")
+    ns = "{http://schemas.android.com/apk/res/android}"
+    aliases = []
+    for node in root.iter("activity-alias"):
+        alias = node.get(f"{ns}name", "")
+        if not alias:
+            continue
+        aliases.append(pkg + alias if alias.startswith(".") else alias)
+    acts: list[dict[str, Any]] = []
+    for node in root.iter("activity"):
+        name = node.get(f"{ns}name", "")
+        if not name:
+            continue
+        if name.startswith("."):
+            name = pkg + name
+        if any(name.startswith(a + ".") for a in aliases):
+            continue
+        exported = node.get(f"{ns}exported")
+        acts.append({
+            "name": name,
+            "simple": short(name),
+            "exported": None if exported is None else exported == "true",
+        })
+    return pkg, acts
+
+
+def _enumerate_with_apkanalyzer(apk: Path) -> tuple[str, list[dict[str, Any]]]:
+    rc, out = _run([apkanalyzer_bin(), "manifest", "print", str(apk)])
+    if rc != 0 or not out.strip():
+        raise ToolsMissing(f"apkanalyzer failed: {out[:200]}")
+    return activities_from_xml(out)
+
+
+def _enumerate_with_androguard(apk: Path) -> tuple[str, list[dict[str, Any]]]:
+    try:
+        from androguard.core.apk import APK
+    except ImportError as exc:  # pragma: no cover - depends on an optional install
+        raise ToolsMissing("androguard not installed (pip install androguard)") from exc
+    manifest = APK(str(apk)).get_android_manifest_xml()
+    text = manifest.decode("utf-8", "ignore") if isinstance(manifest, bytes) else str(manifest)
+    return activities_from_xml(text)
+
+
 def enumerate_activities(apk: Path) -> tuple[str, list[dict[str, Any]]]:
-    """(package, activities) straight from the APK's AndroidManifest.xml."""
+    """(package, activities) straight from the APK's AndroidManifest.xml.
+
+    Three backends, best first: aapt2/aapt (build-tools), apkanalyzer (cmdline-tools), androguard
+    (pure python). Layer A used to hard-require build-tools, which made it unusable on a machine
+    that only had the SDK command-line tools.
+    """
+    try:
+        return _enumerate_with_aapt(apk)
+    except ToolsMissing as first:
+        for fallback in (_enumerate_with_apkanalyzer, _enumerate_with_androguard):
+            try:
+                return fallback(apk)
+            except (ToolsMissing, ET.ParseError, OSError):
+                continue
+        raise ToolsMissing(
+            f"no manifest backend available ({first}) — install build-tools "
+            "(aapt2), cmdline-tools (apkanalyzer) or pip install androguard"
+        ) from first
+
+
+def _enumerate_with_aapt(apk: Path) -> tuple[str, list[dict[str, Any]]]:
     tool = aapt_bin()
     if Path(tool).name.lower().startswith("aapt2"):
         rc, out = _run([tool, "dump", "xmltree", "--file", "AndroidManifest.xml", str(apk)])

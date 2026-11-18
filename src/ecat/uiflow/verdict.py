@@ -171,7 +171,10 @@ def _build_verdict(
         verdict.reasons.append(
             f"测的是 {measured_bundle}，报告头写的是 {bundle} —— 装错包了"
         )
+    measured_sha = str(app.get("sha256") or "")
     verdict.numbers["app"] = f"{measured_bundle or bundle or '?'} v{measured_version or '?'}"
+    if measured_sha:
+        verdict.numbers["app_sha256"] = measured_sha[:12]
 
     # 1. spec vs the port's real page registry
     if port_dir is not None:
@@ -244,8 +247,10 @@ def _build_verdict(
     verdict.numbers["unconfirmed_spec_rows"] = len(unconfirmed)
     result = diff_against_spec(PageGraph.load(base), c_graph, spec_obj)
     app_label = verdict.numbers.get("app", "")
+    app_sha = verdict.numbers.get("app_sha256", "")
     verdict.numbers = {
         **({"app": app_label} if app_label else {}),
+        **({"app_sha256": app_sha} if app_sha else {}),
         "spec_screens": len(result.rows),
         "android_reached": f"{result.android_reached}/{result.android_pages}",
         "port_reached": f"{len(result.present)}/{result.port_pages}",

@@ -186,3 +186,57 @@ def test_chain_a_refuses_to_be_a_denominator_and_b_c_diff_produce_the_number(mon
     assert verdict.fn_rate == 0.0
     assert verdict.numbers["app"] == "com.demo v2.0.0"
     assert verdict.numbers["states"] == "1/1"
+
+
+# ── manifest backends: layer A must not need build-tools ────────────────────
+MANIFEST_XML = """<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">
+  <application>
+    <activity android:name=".Main" android:exported="true"/>
+    <activity android:name="com.demo.Hidden" android:exported="false"/>
+    <activity-alias android:name=".Main.Splash" android:targetActivity=".Main"/>
+    <activity android:name=".Main.Splash.Orange"/>
+  </application>
+</manifest>
+"""
+
+
+def test_manifest_xml_backend_reads_activities_without_aapt() -> None:
+    pkg, acts = inv.activities_from_xml(MANIFEST_XML)
+    assert pkg == "com.demo"
+    by_simple = {a["simple"]: a for a in acts}
+    assert by_simple["Main"]["exported"] is True
+    assert by_simple["Hidden"]["exported"] is False
+    assert "Orange" not in by_simple, "alias theme variants collapse into their target"
+
+
+def test_manifest_xml_backend_refuses_non_xml() -> None:
+    from ecat.uiflow.inventory import ToolsMissing
+
+    with pytest.raises(ToolsMissing):
+        inv.activities_from_xml("binary junk")
+
+
+def test_enumerate_falls_back_when_aapt_is_missing(monkeypatch) -> None:
+    def boom(apk):
+        from ecat.uiflow.inventory import ToolsMissing
+
+        raise ToolsMissing("no aapt")
+
+    monkeypatch.setattr(inv, "_enumerate_with_aapt", boom)
+    monkeypatch.setattr(inv, "_enumerate_with_apkanalyzer",
+                        lambda apk: inv.activities_from_xml(MANIFEST_XML))
+    pkg, acts = inv.enumerate_activities(__import__("pathlib").Path("demo.apk"))
+    assert pkg == "com.demo" and acts
+
+
+def test_enumerate_reports_every_missing_backend(monkeypatch) -> None:
+    from ecat.uiflow.inventory import ToolsMissing
+
+    def boom(apk):
+        raise ToolsMissing("missing")
+
+    for name in ("_enumerate_with_aapt", "_enumerate_with_apkanalyzer", "_enumerate_with_androguard"):
+        monkeypatch.setattr(inv, name, boom)
+    with pytest.raises(ToolsMissing, match="apkanalyzer"):
+        inv.enumerate_activities(__import__("pathlib").Path("demo.apk"))

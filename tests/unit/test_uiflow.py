@@ -205,6 +205,53 @@ def test_state_evidence_survives_the_importer_merge() -> None:
     assert page.extra["states"] == ["my_garden", "plant_list"], "states from both flows are unioned"
 
 
+# ── states vs flows: declaring states without proving them is a trap ────────
+def test_audit_says_states_are_unproven_when_no_flow_marks_them() -> None:
+    from ecat.uiflow.audit import audit_states
+
+    spec = {"screens": [{"screen": "garden", "port": {"screen": "Garden.ets"},
+                         "states": [{"id": "my_garden", "port": {"state": "my_garden"}}]}]}
+    flows = {"flows": [{"id": "home", "steps": [{"launch": True, "screen": "Garden.ets"}]}]}
+    findings = audit_states(spec, flows)["states"]
+    assert [f.check for f in findings] == ["states_not_evidenced"]
+    assert findings[0].severity == "high"
+
+
+def test_audit_names_the_state_a_flow_forgot_to_prove() -> None:
+    from ecat.uiflow.audit import audit_states
+
+    spec = {"screens": [{"screen": "garden", "port": {"screen": "Garden.ets"},
+                         "states": [{"id": "my_garden", "port": {"state": "my_garden"}},
+                                    {"id": "plant_list", "port": {"state": "plant_list"}}]}]}
+    flows = {"flows": [{"id": "home", "steps": [
+        {"launch": True, "screen": "Garden.ets", "state": "my_garden"}]}]}
+    findings = audit_states(spec, flows)["states"]
+    assert [f.check for f in findings] == ["state_uncovered"]
+    assert findings[0].detail.startswith("状态 `plant_list`")
+
+
+def test_audit_is_silent_when_every_state_is_proven() -> None:
+    from ecat.uiflow.audit import audit_states
+
+    spec = {"screens": [{"screen": "garden", "port": {"screen": "Garden.ets"},
+                         "states": [{"id": "my_garden", "port": {"state": "my_garden"}}]}]}
+    flows = {"flows": [{"id": "home", "steps": [
+        {"launch": True, "screen": "Garden.ets", "state": "my_garden"}]}]}
+    assert audit_states(spec, flows)["states"] == []
+
+
+def test_history_tells_two_builds_apart_by_sha_not_version() -> None:
+    from ecat.uiflow.history import Entry, delta
+
+    prev = Entry(bundle="b", version="1.0.0", generated="t1", status="PASS", fn_rate=0.0,
+                 port_pages=2, android_reached="2/2", sha256="aaaa11112222")
+    cur = Entry(bundle="b", version="1.0.0", generated="t2", status="PASS", fn_rate=0.0,
+                port_pages=2, android_reached="2/2", sha256="bbbb33334444")
+    changes = delta(prev, cur)["changes"]
+    assert any("构建 aaaa11112222 → bbbb33334444" in c for c in changes), changes
+    assert not any(c.startswith("版本") for c in changes), "same versionName, different build"
+
+
 # ── spec candidates: propose, never pretend to know ──────────────────────────
 def test_candidate_scoring_prefers_the_same_name() -> None:
     from ecat.uiflow.spec import score_candidate

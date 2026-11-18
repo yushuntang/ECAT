@@ -44,6 +44,8 @@ class Entry:
     dead_pages: list[str] = field(default_factory=list)
     #: False when the run had no --port-dir, so `dead_pages` is unknown rather than empty
     port_checked: bool = True
+    #: sha256 (short) of the installed build — versionName repeats across rebuilds
+    sha256: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -57,6 +59,7 @@ class Entry:
             "missing_pages": list(self.missing_pages),
             "dead_pages": list(self.dead_pages),
             "port_checked": self.port_checked,
+            "sha256": self.sha256,
         }
 
     @classmethod
@@ -73,6 +76,7 @@ class Entry:
             missing_pages=[str(x) for x in (d.get("missing_pages") or [])],
             dead_pages=[str(x) for x in (d.get("dead_pages") or [])],
             port_checked=bool(d.get("port_checked", True)),
+            sha256=str(d.get("sha256") or ""),
         )
 
     @classmethod
@@ -97,6 +101,7 @@ class Entry:
                 c.get("check") == "port-check" and c.get("status") != "skip"
                 for c in (verdict.get("checks") or [])
             ),
+            sha256=str(numbers.get("app_sha256") or ""),
         )
 
 
@@ -139,6 +144,9 @@ def delta(previous: Entry | None, current: Entry) -> dict[str, Any]:
         changes.append(f"状态 {previous.status} → {current.status}")
     if previous.version != current.version:
         changes.append(f"版本 {previous.version or '?'} → {current.version or '?'}")
+    if previous.sha256 != current.sha256 and previous.sha256 and current.sha256:
+        # same versionName, different build: this is the case version numbers cannot see
+        changes.append(f"构建 {previous.sha256[:12]} → {current.sha256[:12]}")
     if previous.fn_rate != current.fn_rate:
         if previous.fn_rate is None or current.fn_rate is None:
             changes.append(f"FN {pct(previous.fn_rate)} → {pct(current.fn_rate)}")

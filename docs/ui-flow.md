@@ -352,6 +352,35 @@ a typo would otherwise be reported as a page the port is missing.
 | `orphan_page` | info | a registered page that neither `loadContent` nor any `pushUrl` reaches — dead surface FN can never see |
 | `no_registry` | warning | `--port-dir` has no `main_pages.json`, check skipped |
 
+## 6. Running this in CI
+
+    BUNDLE=com.example.app DEVICE=<serial> HAP=app.hap \
+    FLOWS=flows.json SPEC=spec.json PORT_DIR=port/ BASE=table-B.json \
+      scripts/uiflow_gate.sh
+
+One command, one exit code (`0` PASS / `1` FAIL / `4` BLOCKED / `2` bad input). It runs the flows,
+builds the C graph, and stops at the first refusal — the script itself decides nothing, so a CI job
+that only looks at `$?` cannot read a number the gates refused to vouch for. Inputs are resolved to
+absolute paths up front (the `ecat` CLI is usually a wrapper that changes directory), and with
+git-bash `cygpath -m` hands native tools a path they can open.
+
+Pass `HAP=` as well: the runner records its sha256, which is what the history keys on — versionName
+stays `1.0.0` across rebuilds, so only the sha can tell two builds apart in a regression delta.
+
+## 7. Where the layers get their evidence
+
+| layer | evidence | backend |
+|---|---|---|
+| A | the manifest's activity table | aapt2/aapt, then `apkanalyzer`, then `androguard` |
+| B | clicks in the original APK | DroidBot, pinned by APK sha (`--baseline-dir`) |
+| C | screens/edges/states a flow reached | `ui_runner` trace (`screen`, `state`) |
+| spec | which Android layout is which port page | human + `spec-from-discovery` candidates |
+| port check | which screens the port actually ships | `main_pages.json` + router / NavPathStack |
+
+Every arrow above is checked somewhere: `discover --from-utg` refuses a UTG explored from another
+build, `diff --apk` warns when the denominator's sha disagrees, and `report` refuses to print FN
+when the port was not measured.
+
 ## 5. Tests: layer A and the whole chain
 
 `tests/unit/test_uiflow_layers.py` covers what used to be untested:

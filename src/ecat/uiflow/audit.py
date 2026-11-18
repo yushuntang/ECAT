@@ -157,6 +157,65 @@ def audit_flows(spec: dict[str, Any], report: dict[str, Any] | None = None) -> A
     return result
 
 
+def audit_states(screen_spec: Any, flow_spec: dict[str, Any]) -> dict[str, list[Finding]]:
+    """Cross-check the states a spec declares against the states the flows prove.
+
+    A state is only provable when a flow step lands on that screen and says
+    `"state": "<id>"`. Declaring states without touching the flows makes every one of them count
+    as missing (`state FN = 100%`), which looks like a port defect and is really a spec/flow
+    mismatch — the kind of trap that makes people stop declaring states at all.
+    """
+    rows = _screen_rows(screen_spec)
+    declared: dict[str, set[str]] = {}
+    for row in rows:
+        port = str((row.get("port") or {}).get("screen") or "")
+        for state in row.get("states") or []:
+            sid = str((state.get("port") or {}).get("state") or state.get("id") or "").strip().lower()
+            if port and sid:
+                declared.setdefault(_stem(port), set()).add(sid)
+    if not declared:
+        return {"states": []}
+
+    evidenced: dict[str, set[str]] = {}
+    for flow in flow_spec.get("flows") or []:
+        for step in flow.get("steps") or []:
+            screen, state = str(step.get("screen") or ""), str(step.get("state") or "")
+            if screen and state:
+                evidenced.setdefault(_stem(screen), set()).add(state.strip().lower())
+
+    findings: list[Finding] = []
+    if not evidenced:
+        findings.append(Finding(
+            "*", "states_not_evidenced", "high",
+            f"spec 声明了 {sum(len(v) for v in declared.values())} 个状态，但没有任何 flow step 写 `state` "
+            "——这些状态会全部算缺失（state FN=100%）",
+            '在落到该屏的步骤上加 "state": "<id>"，否则删掉 spec 里的 states',
+        ))
+        return {"states": findings}
+
+    for screen, states in sorted(declared.items()):
+        for state in sorted(states):
+            if state not in evidenced.get(screen, set()):
+                findings.append(Finding(
+                    screen, "state_uncovered", "medium",
+                    f"状态 `{state}` 在 spec 里声明了，但没有 flow 在这一屏证明它",
+                    f'加一步 {{"tap": "…", "screen": "{screen}", "state": "{state}"}}',
+                ))
+    return {"states": findings}
+
+
+def _stem(value: str) -> str:
+    name = value.strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name[: -len(".ets")] if name.endswith(".ets") else name
+
+
+def _screen_rows(spec: Any) -> list[dict[str, Any]]:
+    """Accept a raw spec payload or a loaded `UiflowSpec`."""
+    if hasattr(spec, "screens"):
+        return [s.to_dict() for s in spec.screens]
+    return list(spec.get("screens") or []) if isinstance(spec, dict) else []
+
+
 def load_spec(path: Path | str) -> dict[str, Any]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or not isinstance(payload.get("flows"), list):
