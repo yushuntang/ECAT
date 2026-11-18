@@ -121,11 +121,17 @@ def read_history(history_dir: Path | str, bundle: str) -> list[Entry]:
     return entries
 
 
-def append_entry(history_dir: Path | str, entry: Entry) -> Path:
+def append_entry(history_dir: Path | str, entry: Entry, *, keep: int = 50) -> Path:
+    """Append one run and keep the file bounded (a delta only ever needs the previous line)."""
     path = history_path(history_dir, entry.bundle)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
+    lines = []
+    if path.exists():
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    lines.append(json.dumps(entry.to_dict(), ensure_ascii=False))
+    if keep > 0:
+        lines = lines[-keep:]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
 

@@ -677,6 +677,44 @@ def uiflow_discover(
     )
 
 
+@uiflow_app.command("audit-discovery")
+def uiflow_audit_discovery(
+    graph: Annotated[Path, typer.Option("--graph", help="layer B graph (discovery output)")],
+    apk: Annotated[Path, typer.Option("--apk", "-a", help="the APK the graph describes")],
+    out: Annotated[Path, typer.Option("--out", help="coverage JSON")] = Path(
+        "reports/ui-flow/discovery-coverage.json"
+    ),
+) -> None:
+    """B 的分母完整吗：manifest 里的 activity 有多少根本没被探索到。"""
+    from ecat.uiflow.discover import activity_coverage
+    from ecat.uiflow.inventory import enumerate_activities
+    from ecat.uiflow.models import PageGraph
+
+    for label, path in (("graph", graph), ("apk", apk)):
+        if not path.exists():
+            console.print(f"[red]{label} not found: {path}[/red]")
+            raise typer.Exit(1)
+    try:
+        pkg, acts = enumerate_activities(apk)
+    except Exception as exc:  # noqa: BLE001 - a missing manifest backend is an input problem
+        console.print(f"[red]cannot read the manifest: {exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    result = activity_coverage(PageGraph.load(graph), acts, package=pkg)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    console.print(
+        f"B 覆盖 {result['app_activities_seen']}/{result['app_activities_total']} 个本 app 的 activity"
+        f"（{result['app_coverage']:.1%}）· 另含库页面 {result['library_activities']} -> {out}"
+    )
+    for name in result["never_reached"][:12]:
+        console.print(f"  [yellow]never reached[/yellow] {name}")
+    if result["never_reached"]:
+        console.print(
+            "[yellow]分母可能偏小：FN 会因此偏低。加大 --count/--timeout 或把这些页补进探索路径。[/yellow]"
+        )
+
+
 @uiflow_app.command("import-flows")
 def uiflow_import_flows(
     report: Annotated[Path, typer.Option("--from", help="T2 functional-gate report (ui_runner JSON)")],

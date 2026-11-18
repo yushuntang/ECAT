@@ -5,6 +5,7 @@
 #   FLOWS=flows.json SPEC=spec.json PORT_DIR=port/ BASE=table-B.json \
 #     eval/ecat/scripts/uiflow_gate.sh
 #
+# Extra env: CHANGED=screens (run only flows touching them), OUT_DIR=<dir> (default reports/ui-flow).
 # Exit codes are the verdict's own: 0 PASS, 1 FAIL, 4 BLOCKED (not measurable), 2 bad input.
 # Nothing here decides anything — it only stops the chain at the first refusal, so a CI job that
 # looks at $? cannot read a number the gates did not vouch for.
@@ -58,6 +59,8 @@ mkdir -p "$OUT_DIR"
 echo "== 1/3 flows on $DEVICE (bundle $BUNDLE) =="
 runner_args=(--flows "$FLOWS" --out "$REPORT_JSON" --bundle "$BUNDLE" --device "$DEVICE" --no-hypium)
 [[ -n "$HAP" ]] && runner_args+=(--hap "$HAP")
+# CHANGED="Garden.ets,PlantDetail.ets" runs only flows touching those screens
+[[ -n "${CHANGED:-}" ]] && runner_args+=(--changed "$CHANGED")
 "$PY" "$RUNNER" "${runner_args[@]}" > "$OUT_DIR/runner.log" 2>&1
 runner_rc=$?
 if [[ ! -f "$REPORT_JSON" ]]; then
@@ -78,6 +81,7 @@ echo "== 3/3 verdict =="
   --flows "$FLOWS" \
   --port-dir "$PORT_DIR" \
   --bundle "$BUNDLE" \
+  --history-dir "$OUT_DIR/history" \
   --out "$VERDICT_JSON"
 rc=$?
 

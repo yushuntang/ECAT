@@ -421,6 +421,7 @@ generator:
 | `ecat uiflow spec-confirm` | Accept the auto-proposed screen pairings once a human has reviewed them |
 | state coverage | `states` in a spec row + `"state"` on flow steps → `state FN` for tabs/filters/panels inside a page |
 | `scripts/uiflow_gate.sh` | CI entry point: flows → C graph → verdict, exits with the verdict's code |
+| `ecat uiflow audit-discovery` | Is B's denominator complete? Manifest activities vs discovered pages, app vs library |
 
 Common examples for each subcommand follow.
 

@@ -279,6 +279,56 @@ def file_sha256(path: Path | str) -> str:
     return digest.hexdigest()
 
 
+def activity_coverage(
+    graph: Any, activities: list[dict[str, Any]], package: str = ""
+) -> dict[str, Any]:
+    """How much of the manifest's activity table layer B actually reached.
+
+    The FN denominator is B's page set, so an exploration that never reached half the app produces
+    a small denominator and therefore a flattering FN. This turns that into a number instead of a
+    suspicion: activities the manifest has that no discovered page maps to.
+    """
+    def _simple(value: str) -> str:
+        """`com.demo.MainActivity`, `.MainActivity` and `com.demo/.MainActivity` are one name."""
+        tail = value.strip().replace("\\", "/").rsplit("/", 1)[-1]
+        return tail.rsplit(".", 1)[-1].lower()
+
+    seen: set[str] = set()
+    for page in graph.pages:
+        extra = page.extra or {}
+        for key in ("activity", "component"):
+            value = str(extra.get(key) or "")
+            if value:
+                seen.add(_simple(value))
+        seen.add(_simple(str(page.component or "")))
+        seen.add(_simple(str(page.label or "").split("[", 1)[0]))
+
+    wanted = {
+        str(a.get("simple") or "").lower(): str(a.get("name") or "")
+        for a in activities
+        if a.get("simple")
+    }
+    missing = sorted(simple for simple in wanted if simple and simple not in seen)
+
+    # library activities (ExoPlayer, commons' License/ManageBlockedNumbers…) are pages that exist
+    # but are not product flow: counting them makes coverage look catastrophic for the wrong reason
+    in_pkg = {s: n for s, n in wanted.items() if not package or n.startswith(package)}
+    lib = {s: n for s, n in wanted.items() if s not in in_pkg}
+    base = in_pkg or wanted
+    seen_base = [s for s in base if s in seen]
+    return {
+        "activities_total": len(wanted),
+        "activities_seen": len(wanted) - len(missing),
+        "coverage": round((len(wanted) - len(missing)) / len(wanted), 4) if wanted else 0.0,
+        "app_activities_total": len(base),
+        "app_activities_seen": len(seen_base),
+        "app_coverage": round(len(seen_base) / len(base), 4) if base else 0.0,
+        "library_activities": len(lib),
+        "never_reached": [base[s] for s in sorted(base) if s not in seen],
+        "never_reached_library": [lib[s] for s in sorted(lib) if s not in seen],
+    }
+
+
 def baseline_path(baseline_dir: Path | str, app_sha256: str) -> Path:
     return Path(baseline_dir) / f"{app_sha256}.utg.js"
 

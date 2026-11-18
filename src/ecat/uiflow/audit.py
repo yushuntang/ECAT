@@ -193,6 +193,25 @@ def audit_states(screen_spec: Any, flow_spec: dict[str, Any]) -> dict[str, list[
         ))
         return {"states": findings}
 
+    texts: dict[str, dict[str, set[str]]] = {}
+    for row in rows:
+        port = str((row.get("port") or {}).get("screen") or "")
+        for state in row.get("states") or []:
+            words = _tokens(str((state.get("android") or {}).get("text") or ""))
+            sid = str((state.get("port") or {}).get("state") or state.get("id") or "").strip().lower()
+            if port and sid and words:
+                texts.setdefault(_stem(port), {})[sid] = words
+    for screen, per_state in sorted(texts.items()):
+        ids = sorted(per_state)
+        for i, a_id in enumerate(ids):
+            for b_id in ids[i + 1:]:
+                if per_state[a_id] <= per_state[b_id] or per_state[b_id] <= per_state[a_id]:
+                    findings.append(Finding(
+                        screen, "state_ambiguous", "medium",
+                        f"状态 `{a_id}` 与 `{b_id}` 的 android.text 互相包含，靠文本证据分不开",
+                        "给两个状态写互不包含的文本（例如各自独有的标签）",
+                    ))
+
     for screen, states in sorted(declared.items()):
         for state in sorted(states):
             if state not in evidenced.get(screen, set()):
@@ -202,6 +221,13 @@ def audit_states(screen_spec: Any, flow_spec: dict[str, Any]) -> dict[str, list[
                     f'加一步 {{"tap": "…", "screen": "{screen}", "state": "{state}"}}',
                 ))
     return {"states": findings}
+
+
+def _tokens(text: str) -> set[str]:
+    import re as _re
+
+    spaced = _re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    return {t for t in _re.split(r"[^A-Za-z0-9]+", spaced.lower()) if t}
 
 
 def _stem(value: str) -> str:

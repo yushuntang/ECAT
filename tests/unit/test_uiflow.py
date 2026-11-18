@@ -335,6 +335,45 @@ def _entry(bundle="demo", version="1.0.0", status="PASS", fn=0.0, missing=(), de
                  missing_pages=list(missing), dead_pages=list(dead))
 
 
+def test_history_keeps_the_file_bounded(tmp_path) -> None:
+    from ecat.uiflow.history import append_entry, read_history
+
+    for i in range(6):
+        append_entry(tmp_path, _entry(fn=i / 100), keep=3)
+    entries = read_history(tmp_path, "demo")
+    assert len(entries) == 3 and entries[-1].fn_rate == 0.05
+
+
+def test_ambiguous_state_texts_are_reported(tmp_path) -> None:
+    from ecat.uiflow.audit import audit_states
+
+    spec = {"screens": [{"screen": "garden", "port": {"screen": "Garden.ets"},
+                         "states": [{"id": "a", "android": {"text": "Garden"},
+                                     "port": {"state": "a"}},
+                                    {"id": "b", "android": {"text": "My Garden"},
+                                     "port": {"state": "b"}}]}]}
+    flows = {"flows": [{"id": "f", "steps": [
+        {"launch": True, "screen": "Garden.ets", "state": "a"},
+        {"tap": "x", "screen": "Garden.ets", "state": "b"}]}]}
+    checks = [f.check for f in audit_states(spec, flows)["states"]]
+    assert "state_ambiguous" in checks
+
+
+def test_discovery_coverage_names_the_activities_b_never_reached() -> None:
+    from ecat.uiflow.discover import activity_coverage
+    from ecat.uiflow.models import Page, PageGraph
+
+    graph = PageGraph(side="android", method="click")
+    graph.pages = [Page(key="1", label="Main", component="com.demo/.MainActivity",
+                        extra={"activity": ".MainActivity"})]
+    acts = [{"name": "com.demo.MainActivity", "simple": "MainActivity"},
+            {"name": "com.demo.MediaActivity", "simple": "MediaActivity"}]
+    result = activity_coverage(graph, acts)
+    assert result["activities_total"] == 2 and result["activities_seen"] == 1
+    assert result["never_reached"] == ["com.demo.MediaActivity"]
+    assert result["coverage"] == 0.5
+
+
 def test_history_is_per_bundle_and_round_trips(tmp_path) -> None:
     from ecat.uiflow.history import append_entry, read_history
 

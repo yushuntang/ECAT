@@ -352,6 +352,18 @@ a typo would otherwise be reported as a page the port is missing.
 | `orphan_page` | info | a registered page that neither `loadContent` nor any `pushUrl` reaches — dead surface FN can never see |
 | `no_registry` | warning | `--port-dir` has no `main_pages.json`, check skipped |
 
+## 5b. Is the denominator complete?
+
+    ecat uiflow audit-discovery --graph <B.json> --apk <app.apk> --out reports/ui-flow/discovery-coverage.json
+
+FN divides by B's page set, so an exploration that never reached half the app produces a small
+denominator and a flattering number. This compares the manifest's activity table with what discovery
+actually reached and reports the gap as a number, split into the app's own activities and the library
+pages it also ships (ExoPlayer, commons' License…), which are pages but not product flow.
+
+Measured on this project: the gallery exploration reached **2 of 18** of the app's own activities
+(11%) — i.e. the 30-event / 300-second default was the binding constraint, not the port.
+
 ## 6. Running this in CI
 
     BUNDLE=com.example.app DEVICE=<serial> HAP=app.hap \
@@ -363,6 +375,10 @@ builds the C graph, and stops at the first refusal — the script itself decides
 that only looks at `$?` cannot read a number the gates refused to vouch for. Inputs are resolved to
 absolute paths up front (the `ecat` CLI is usually a wrapper that changes directory), and with
 git-bash `cygpath -m` hands native tools a path they can open.
+
+Extra knobs: `CHANGED=Garden.ets,PlantDetail.ets` runs only flows touching those screens, and the
+history is written under `$OUT_DIR/history` so it travels with the job's artifacts (a fresh
+workspace would otherwise report `first_run` on every build). History files keep the last 50 runs.
 
 Pass `HAP=` as well: the runner records its sha256, which is what the history keys on — versionName
 stays `1.0.0` across rebuilds, so only the sha can tell two builds apart in a regression delta.
