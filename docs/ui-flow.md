@@ -352,6 +352,26 @@ a typo would otherwise be reported as a page the port is missing.
 | `orphan_page` | info | a registered page that neither `loadContent` nor any `pushUrl` reaches — dead surface FN can never see |
 | `no_registry` | warning | `--port-dir` has no `main_pages.json`, check skipped |
 
+## 5c. Two ways a green flow lies (found by mutating the port)
+
+A marker is a **claim**; the runner also records the screen signature, and those two can disagree.
+
+| what the port did | what an honest run must say |
+|---|---|
+| route removed, tap still "succeeds" | signature unchanged → the claimed screen is **`declared`**, not reached |
+| assertion text also present on the previous screen | the assertion is marked **`weak`** → cannot be evidence of arrival |
+
+Both are now enforced: `observed_markers()` drops weak entries and entries whose signature did not
+move, `graph_from_flows_report` counts a screen as reached only from such markers (falling back to
+declared screens only for flows with no markers at all), and `stats` carries `weak_assertions` and
+`marker_verified`.
+
+This came out of mutating this project's own port: deleting the `router.pushUrl` to the detail page
+rebuilt in 24s, and the same five flows that had been "5/5 green" then failed on the detail
+assertion. The assertion had been passing on a *different build* — the detail page now renders
+`Watering needs` + `every 30 days` as two labels, while the flow still asserted the Android phrasing
+`Water every 30 days`. Green meant "the text matched somewhere", not "this screen is right".
+
 ## 5b. Is the denominator complete?
 
     ecat uiflow audit-discovery --graph <B.json> --apk <app.apk> --out reports/ui-flow/discovery-coverage.json

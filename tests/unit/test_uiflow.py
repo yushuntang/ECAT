@@ -205,6 +205,42 @@ def test_state_evidence_survives_the_importer_merge() -> None:
     assert page.extra["states"] == ["my_garden", "plant_list"], "states from both flows are unioned"
 
 
+# ── a weak assertion is not evidence of arrival ─────────────────────────────
+def test_weak_assertion_does_not_credit_the_screen() -> None:
+    """The label was already on the previous screen: presence proves nothing about navigation."""
+    from ecat.uiflow.flows_report import graph_from_flows_report
+
+    payload = _flows_report({
+        "id": "detail", "status": "pass", "screens": ["Garden.ets", "PlantDetail.ets"],
+        "trace": [
+            {"step": 0, "action": "launch", "screen": "Garden.ets", "sig": "garden"},
+            {"step": 1, "action": "tap(Apple)", "screen": "PlantDetail.ets", "sig": "garden"},
+            # the assertion passed only because Garden already shows that text
+            {"step": 2, "action": "expect_visible", "screen": "PlantDetail.ets", "sig": "garden",
+             "weak": True},
+        ]})
+    g = graph_from_flows_report(payload)
+    reached = {p.label for p in g.pages if p.countable}
+    assert reached == {"Garden.ets"}, f"PlantDetail must not count: {reached}"
+    assert g.stats["weak_assertions"] == 1
+
+
+def test_a_marker_without_page_change_is_not_arrival() -> None:
+    """A dead route: the step claims a screen but the signature never moved."""
+    from ecat.uiflow.flows_report import graph_from_flows_report
+
+    payload = _flows_report({
+        "id": "dead_route", "status": "fail", "step": 2, "step_name": "expect_page_changed",
+        "screens": ["Garden.ets", "PlantDetail.ets"],
+        "trace": [
+            {"step": 0, "action": "launch", "screen": "Garden.ets", "sig": "same"},
+            {"step": 1, "action": "tap(Apple)", "screen": "PlantDetail.ets", "sig": "same"},
+            {"step": 2, "action": "expect_page_changed", "screen": "PlantDetail.ets", "sig": "same"},
+        ]})
+    g = graph_from_flows_report(payload)
+    assert {p.label for p in g.pages if p.countable} == {"Garden.ets"}
+
+
 # ── states vs flows: declaring states without proving them is a trap ────────
 def test_audit_says_states_are_unproven_when_no_flow_marks_them() -> None:
     from ecat.uiflow.audit import audit_states

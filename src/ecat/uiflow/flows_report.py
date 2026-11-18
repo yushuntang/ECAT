@@ -54,7 +54,7 @@ def _screen_pages(
 ) -> tuple[dict[str, Page], dict[str, int]]:
     pages: dict[str, Page] = {}
     stats = {"pass": 0, "fail_assert": 0, "fail_nav": 0, "error": 0, "skip": 0,
-             "no_screens": 0, "partial": 0, "dependency_skips": 0}
+             "no_screens": 0, "partial": 0, "dependency_skips": 0, "weak_assertions": 0}
 
     for flow in payload.get("flows") or []:
         status = str(flow.get("status") or "").lower()
@@ -69,22 +69,23 @@ def _screen_pages(
 
         # What the step trace proves was actually on screen, regardless of how the flow
         # ended: a failure at a later tap must not erase a screen already visited.
-        states_by_screen: dict[str, set[str]] = {}
         for entry in flow.get("trace") or []:
-            if isinstance(entry, dict) and entry.get("screen") and entry.get("state"):
+            if isinstance(entry, dict) and entry.get("weak"):
+                stats["weak_assertions"] += 1
+
+        fail_step = flow.get("step") if status != "pass" and isinstance(flow.get("step"), int) else None
+        proven = observed_markers(flow.get("trace") or [], upto_step=fail_step)
+
+        states_by_screen: dict[str, set[str]] = {}
+        for entry in proven:
+            if entry.get("state"):
                 states_by_screen.setdefault(str(entry["screen"]).strip(), set()).add(
                     str(entry["state"]).strip().lower()
                 )
 
         traced: dict[str, int] = {}
-        fail_step = flow.get("step")
-        for entry in flow.get("trace") or []:
-            if not isinstance(entry, dict) or not entry.get("screen"):
-                continue
-            step_idx = int(entry.get("step") or 0)
-            if status != "pass" and isinstance(fail_step, int) and step_idx > fail_step:
-                continue  # this marker comes after the flow died
-            traced[str(entry["screen"]).strip()] = step_idx
+        for entry in proven:
+            traced[str(entry["screen"]).strip()] = int(entry.get("step") or 0)
 
         reached = False
         verdict = "unknown"
@@ -106,6 +107,13 @@ def _screen_pages(
         if not reached and traced:
             stats["partial"] = stats.get("partial", 0) + 1
 
+        # When the flow marks its steps, the markers are authoritative: a screen that was only
+        # *declared* is not evidence of arrival (the port may never have opened it, and a passing
+        # assertion can be satisfied by the previous screen's own labels).
+        has_markers = any(isinstance(e, dict) and e.get("screen") for e in flow.get("trace") or [])
+        if has_markers:
+            stats["marker_verified"] = stats.get("marker_verified", 0) + 1
+
         for screen in screens:
             existing = pages.get(screen)
             if existing is not None and existing.verdict == "reached":
@@ -113,12 +121,13 @@ def _screen_pages(
                     merged = set(existing.extra.get("states") or []) | states_by_screen[screen]
                     existing.extra["states"] = sorted(merged)
                 continue  # a later failing flow must not demote a screen another flow proved
-            screen_reached = reached or screen in traced
+            screen_reached = screen in traced if has_markers else reached or screen in traced
             page = Page(
                 key=f"flow:{screen}",
                 label=screen,
                 component=f"{payload.get('bundle') or 'port'}#{screen}",
-                verdict="reached" if screen_reached else verdict,
+                # a declared-but-unproven screen is neither reached nor "finished": it is a claim
+                verdict="reached" if screen_reached else ("declared" if has_markers else verdict),
                 side="oh",
                 extra={
                     "flow": flow.get("id"),
@@ -132,6 +141,36 @@ def _screen_pages(
             )
             pages[screen] = page
     return pages, stats
+
+
+def observed_markers(
+    trace: list[dict[str, Any]], *, upto_step: int | None = None
+) -> list[dict[str, Any]]:
+    """Trace entries whose `screen` claim is backed by an observed page change.
+
+    A flow step says which screen it *lands on*; the runner also records the screen signature.
+    When the signature did not move, the claim is just a claim — the navigation silently did
+    nothing (this is exactly what a dead route looks like). Crediting those markers made a
+    broken port read as "all pages present", so only markers with a changed signature count.
+    """
+    markers: list[dict[str, Any]] = []
+    prev: str | None = None
+    for entry in trace or []:
+        if not isinstance(entry, dict) or not entry.get("screen"):
+            continue
+        if entry.get("weak"):
+            # the runner found this assertion already true on the previous screen: it does not
+            # prove we are anywhere new, so it cannot be evidence of having reached this screen
+            continue
+        step = int(entry.get("step") or 0)
+        if upto_step is not None and step > upto_step:
+            continue
+        sig = str(entry.get("sig") or "")
+        moved = prev is None or not sig or sig != prev
+        if moved:
+            markers.append(entry)
+        prev = sig or prev
+    return markers
 
 
 def graph_from_flows_report(
@@ -174,13 +213,10 @@ def _add_edges(graph: PageGraph, payload: dict[str, Any], pages: dict[str, Page]
         status = str(flow.get("status") or "").lower()
         fail_step = flow.get("step")
         trace = [e for e in (flow.get("trace") or []) if isinstance(e, dict)]
-        markers = [
-            e
-            for e in trace
-            if e.get("screen")
-            and (status == "pass" or not isinstance(fail_step, int)
-                 or int(e.get("step") or 0) <= fail_step)
-        ]
+        markers = observed_markers(
+            trace,
+            upto_step=None if status == "pass" or not isinstance(fail_step, int) else fail_step,
+        )
         if not markers and status != "pass":
             continue  # nothing proven by a failed flow without markers
 

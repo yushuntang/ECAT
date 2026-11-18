@@ -25,6 +25,8 @@ COUNTABLE_VERDICTS = frozenset({"reached", "reached_trampoline"})
 
 VERDICTS = (
     "reached",
+    #: a flow listed this screen but never proved it (marker missing, weak, or signature unmoved)
+    "declared",
     "reached_trampoline",
     "finished",
     "redirect",
