@@ -740,6 +740,42 @@ def uiflow_audit_discovery(
         )
 
 
+@uiflow_app.command("merge-graphs")
+def uiflow_merge_graphs(
+    graphs: Annotated[list[Path], typer.Argument(help="B graphs to union (2 or more)")],
+    out: Annotated[Path, typer.Option("--out", help="merged graph JSON")] = Path(
+        "reports/ui-flow/table-B-merged.json"
+    ),
+    apk: Annotated[Path | None, typer.Option("--apk", help="report the coverage of the merged graph")] = None,
+) -> None:
+    """把多轮探索并成一个分母，并可选地报告它覆盖了 manifest 里多少 activity。"""
+    from ecat.uiflow.discover import activity_coverage, merge_graphs
+    from ecat.uiflow.models import PageGraph
+
+    loaded = []
+    for path in graphs:
+        if not path.exists():
+            console.print(f"[red]graph not found: {path}[/red]")
+            raise typer.Exit(1)
+        loaded.append(PageGraph.load(path))
+
+    merged = merge_graphs(loaded)
+    path = merged.save(out)
+    console.print(
+        f"[green]merged {len(loaded)} graph(s) -> {path}[/green] · "
+        f"pages={len(merged.pages)} edges={len(merged.edges)}"
+    )
+    if apk is not None and apk.exists():
+        from ecat.uiflow.inventory import enumerate_activities
+
+        pkg, acts = enumerate_activities(apk)
+        cov = activity_coverage(merged, acts, package=pkg)
+        console.print(
+            f"覆盖 {cov['app_activities_seen']}/{cov['app_activities_total']} 个本 app activity"
+            f"（{cov['app_coverage']:.1%}）· 仍有 {len(cov['never_reached'])} 个没到"
+        )
+
+
 @uiflow_app.command("import-flows")
 def uiflow_import_flows(
     report: Annotated[Path, typer.Option("--from", help="T2 functional-gate report (ui_runner JSON)")],

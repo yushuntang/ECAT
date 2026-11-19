@@ -279,6 +279,59 @@ def file_sha256(path: Path | str) -> str:
     return digest.hexdigest()
 
 
+def merge_graphs(graphs: list[Any], *, side: str = "android") -> Any:
+    """Union several explorations into one denominator.
+
+    One DroidBot round is a sample: 30 events reached 2 of 18 activities here, and a second round
+    reached a different page. Pages are keyed by the content-free structure (so the same screen
+    showing another row is still one page); edges are keyed by (src, dst, action).
+    """
+    from ecat.uiflow.models import Edge, Page, PageGraph
+
+    merged = PageGraph(side=side, method="click", engine="discovery-union")
+    sha, target = "", ""
+    for graph in graphs:
+        sha = sha or str((graph.stats or {}).get("app_sha256") or "")
+        target = target or str(graph.target or "")
+        for page in graph.pages:
+            structure = str((page.extra or {}).get("structure") or "").strip().lower()
+            key = f"structure:{structure}" if structure else page.key
+            existing = next((p for p in merged.pages if p.key == key), None)
+            if existing is None:
+                merged.pages.append(Page(
+                    key=key,
+                    label=page.label,
+                    component=page.component,
+                    verdict=page.verdict,
+                    detail=page.detail,
+                    side=page.side,
+                    extra=dict(page.extra or {}),
+                ))
+            else:
+                # keep the first label, but remember every state we saw of this layout
+                seen = set(existing.extra.get("labels") or [])
+                seen.add(page.label)
+                existing.extra["labels"] = sorted(seen)
+
+    edge_keys = {(e.src, e.dst, e.action) for e in merged.edges}
+    for graph in graphs:
+        for edge in graph.edges:
+            key = (edge.src, edge.dst, edge.action)
+            if key not in edge_keys:
+                edge_keys.add(key)
+                merged.edges.append(Edge(src=edge.src, dst=edge.dst, action=edge.action,
+                                         source=edge.source))
+
+    merged.target = target
+    merged.stats = {
+        "app_sha256": sha,
+        "rounds": len(graphs),
+        "pages": len(merged.pages),
+        "edges": len(merged.edges),
+    }
+    return merged
+
+
 def activity_coverage(
     graph: Any, activities: list[dict[str, Any]], package: str = ""
 ) -> dict[str, Any]:

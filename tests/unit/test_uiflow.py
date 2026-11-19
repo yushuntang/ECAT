@@ -458,6 +458,27 @@ def test_ambiguous_state_texts_are_reported(tmp_path) -> None:
     assert "state_ambiguous" in checks
 
 
+def test_merge_graphs_unions_pages_by_structure_and_edges_by_action() -> None:
+    from ecat.uiflow.discover import merge_graphs
+    from ecat.uiflow.models import Edge, Page, PageGraph
+
+    a = PageGraph(side="android", method="click")
+    a.pages = [Page(key="a1", label='Main "A"', component="c", extra={"structure": "S1"})]
+    a.edges = [Edge(src="a1", dst="a2", action="tap(X)", source="trace")]
+    b = PageGraph(side="android", method="click")
+    b.pages = [
+        Page(key="b1", label='Main "B"', component="c", extra={"structure": "S1"}),  # same layout
+        Page(key="b2", label="Detail", component="c", extra={"structure": "S2"}),
+    ]
+    b.edges = [Edge(src="b1", dst="b2", action="tap(Folder)", source="trace")]
+    b.stats = {"app_sha256": "deadbeef"}
+
+    merged = merge_graphs([a, b])
+    assert len(merged.pages) == 2, "the same structure is one page, whatever data it showed"
+    assert merged.stats["app_sha256"] == "deadbeef" and merged.stats["rounds"] == 2
+    assert {e.action for e in merged.edges} == {"tap(X)", "tap(Folder)"}
+
+
 def test_discovery_coverage_names_the_activities_b_never_reached() -> None:
     from ecat.uiflow.discover import activity_coverage
     from ecat.uiflow.models import Page, PageGraph

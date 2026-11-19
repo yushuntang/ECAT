@@ -372,6 +372,23 @@ assertion. The assertion had been passing on a *different build* — the detail 
 `Watering needs` + `every 30 days` as two labels, while the flow still asserted the Android phrasing
 `Water every 30 days`. Green meant "the text matched somewhere", not "this screen is right".
 
+## 5a. Raising the denominator: union of exploration rounds
+
+One DroidBot round is a *sample*: with 30 events it reached 2 of the gallery's own 18 activities.
+The denominator is that page set, so a thin sample makes FN look good for the wrong reason.
+
+    # three independent rounds, same build (sha-pinned), then union them
+    for i in 1 2 3; do
+      ecat uiflow discover --apk app.apk --serial emulator-5630 --refresh \
+        --count 120 --timeout 600 --out reports/ui-flow/B-$i.json
+    done
+    ecat uiflow merge-graphs reports/ui-flow/B-*.json --apk app.apk \
+        --out reports/ui-flow/table-B.json
+
+`merge-graphs` keys pages by the content-free structure (`structure:<hash>`), so the same layout
+showing different rows stays one page, and unions edges by `(src, dst, action)`. `--apk` reports the
+resulting coverage, and `--out` is what `uiflow report --base` should point at.
+
 ## 5b. Is the denominator complete?
 
     ecat uiflow audit-discovery --graph <B.json> --apk <app.apk> --out reports/ui-flow/discovery-coverage.json
