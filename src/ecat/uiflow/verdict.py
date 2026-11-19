@@ -55,6 +55,28 @@ def classify_missing(result: Any, known_screens: set[str]) -> list[dict[str, str
     return rows
 
 
+def data_parity(result: Any, port_graph: Any) -> list[str]:
+    """Warn when the port shows far less content than Android on the same screen.
+
+    Page identity survived an empty device (the page is there), so FN said 0% while the port was
+    showing "no media files have been found" and Android showed a folder list. That is a data
+    difference, and the report has to say so instead of letting the number imply "all good".
+    """
+    notes: list[str] = []
+    port_pages = {p.label: p for p in getattr(port_graph, "pages", [])}
+    for row in result.present:
+        port_page = port_pages.get(row.port_page)
+        if port_page is None:
+            continue
+        shown = int(((port_page.extra or {}).get("data") or {}).get("labels") or 0)
+        expected = _text_count(row.android_page)
+        if shown and expected >= 3 and shown <= 2:
+            notes.append(
+                f"数据可能不对等：{row.screen} 端口只渲染 {shown} 个标签，Android 侧有 {expected} 段文案"
+            )
+    return notes
+
+
 @dataclass
 class Check:
     name: str
@@ -300,6 +322,13 @@ def _build_verdict(
     }
     verdict.missing_pages = [r.screen for r in result.missing]
     verdict.missing_detail = classify_missing(result, known_screens)
+    parity = data_parity(result, c_graph)
+    verdict.checks.append(Check(
+        "data-parity", "warn" if parity else "pass",
+        "; ".join(parity) if parity else "两边的页面内容量相当",
+    ))
+    if parity:
+        verdict.reasons += parity
     state_fn = result.state_fn_rate
     if state_fn is None:
         verdict.checks.append(Check("state-coverage", "skip", "spec 没声明任何状态（tab/筛选/面板）"))

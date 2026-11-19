@@ -227,6 +227,34 @@ def test_pages_carry_a_data_fingerprint() -> None:
     assert page.extra["data"]["labels"] == 3
 
 
+def test_data_parity_warns_when_the_port_renders_far_less() -> None:
+    from ecat.uiflow.models import Page, PageGraph
+    from ecat.uiflow.spec import SpecDiffResult, SpecRow
+    from ecat.uiflow.verdict import data_parity
+
+    port = PageGraph(side="oh", method="gate")
+    port.pages = [Page(key="1", label="Media.ets", component="c",
+                       extra={"data": {"labels": 1, "sample": ["no media files have been found"]}})]
+    result = SpecDiffResult(rows=[SpecRow(screen="media", android_reached=True, port_present=True,
+                                          android_page='Media[$ab] "06.11.2026/09.11.2026/a.png"',
+                                          port_page="Media.ets")])
+    notes = data_parity(result, port)
+    assert notes and "数据可能不对等" in notes[0]
+
+
+def test_data_parity_is_quiet_when_both_sides_show_content() -> None:
+    from ecat.uiflow.models import Page, PageGraph
+    from ecat.uiflow.spec import SpecDiffResult, SpecRow
+    from ecat.uiflow.verdict import data_parity
+
+    port = PageGraph(side="oh", method="gate")
+    port.pages = [Page(key="1", label="Media.ets", component="c",
+                       extra={"data": {"labels": 5, "sample": []}})]
+    result = SpecDiffResult(rows=[SpecRow(screen="media", android_reached=True, port_present=True,
+                                          android_page='Media[$ab] "a/b"', port_page="Media.ets")])
+    assert data_parity(result, port) == []
+
+
 def test_missing_pages_are_classified_by_what_is_actually_wrong() -> None:
     from ecat.uiflow.spec import SpecDiffResult, SpecRow
     from ecat.uiflow.verdict import classify_missing
@@ -541,9 +569,9 @@ def test_verdict_passes_and_carries_exactly_one_fn_number(tmp_path) -> None:
     v = build_verdict(base=base, port_report=report, spec=spec, flows=flows, port_dir=port_dir, bundle="demo")
     assert v.status == PASS and v.exit_code == 0
     assert v.fn_rate == 0.0
-    assert [c.name for c in v.checks] == [
-        "port-check", "flow-audit", "port-measured", "spec-reviewed", "state-coverage", "diff",
-    ]
+    names = [c.name for c in v.checks]
+    assert names[0] == "port-check" and names[-1] == "diff"
+    assert {"flow-audit", "port-measured", "spec-reviewed", "state-coverage", "data-parity"} <= set(names)
     assert v.to_markdown().count("FN 率") == 1
     assert v.to_dict()["schema"] == "ecat.uiflow.verdict/1"
 
