@@ -422,6 +422,8 @@ generator:
 | state coverage | `states` in a spec row + `"state"` on flow steps → `state FN` for tabs/filters/panels inside a page |
 | `scripts/uiflow_gate.sh` | CI entry point: flows → C graph → verdict, exits with the verdict's code |
 | `ecat uiflow audit-discovery` | Is B's denominator complete? Manifest activities vs discovered pages, app vs library |
+| `ecat uiflow suggest-assertions` | Which labels can prove arrival (present here, absent on the previous screen) |
+| `scripts/uiflow_fix_verify.sh` | work item → refine → build → same flows → verdict → history |
 
 Common examples for each subcommand follow.
 

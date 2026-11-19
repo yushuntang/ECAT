@@ -384,6 +384,35 @@ pages it also ships (ExoPlayer, commons' License…), which are pages but not pr
 Measured on this project: the gallery exploration reached **2 of 18** of the app's own activities
 (11%) — i.e. the 30-event / 300-second default was the binding constraint, not the port.
 
+## 5d. What the report tells you to do, and when it cannot be trusted
+
+Four additions, all from failures that actually happened here:
+
+| output | what it answers | command |
+|---|---|---|
+| per-page missing kind | `missing_page` (port lacks it) vs `entry_broken` (port ships it, nothing reaches it) vs `unmapped` (spec row has no port screen) | `uiflow report` → `missing_detail` |
+| discriminating assertions | which labels exist *only* on the new screen — the only ones that can prove arrival | `uiflow suggest-assertions --report <T2 report>` |
+| data fingerprint | how much content each screen showed (`labels`, `sample`) | `Page.extra["data"]` in the C graph |
+| system chrome filter | HarmonyOS chrome (`LiveMetaBallBaseVm`, `ClockStatusView`, `__Common__`) no longer pollutes signatures | `ui_runner.is_system_noise()` |
+
+Two honesty notes:
+
+* Suggestions are computed from the runner's signature, which used to be truncated at 32 chars.
+  Reports produced before that cap was raised still yield fragments (`cloc`, `grow`); re-run the
+  flows to get whole labels.
+* Element-level coverage is deliberately **not** implemented. Comparing element *text* across
+  platforms measures copy differences, not structure (measured Jaccard 0.05–0.50 on the same
+  screen); it needs element *types/positions* from both sides, which is a different feature.
+
+## 7. Fix-and-verify loop
+
+    PROJECT=<harmony project> WORK_ITEM=<work item json> BUNDLE=… DEVICE=… FLOWS=… SPEC=… \
+    PORT_DIR=… BASE=<B graph> scripts/uiflow_fix_verify.sh
+
+work item → prompt → `ecat refine` → build → install → **the same flows** → verdict → history
+delta. The script never rewrites expectations after a failure: a red verdict stays red until the
+port changes.
+
 ## 6. Running this in CI
 
     BUNDLE=com.example.app DEVICE=<serial> HAP=app.hap \

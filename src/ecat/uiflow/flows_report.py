@@ -76,6 +76,19 @@ def _screen_pages(
         fail_step = flow.get("step") if status != "pass" and isinstance(flow.get("step"), int) else None
         proven = observed_markers(flow.get("trace") or [], upto_step=fail_step)
 
+        # Data fingerprint: how much content this screen actually showed. A port with an empty
+        # device and an Android side full of rows look identical at page level, and then FN
+        # blames the port for missing pages it never had data to render.
+        fingerprint: dict[str, dict[str, Any]] = {}
+        for entry in proven:
+            sig = str(entry.get("sig") or "")
+            tokens = [t for t in sig.split("|") if t]
+            if tokens:
+                fingerprint[str(entry["screen"]).strip()] = {
+                    "labels": len(tokens),
+                    "sample": sorted(tokens)[:6],
+                }
+
         states_by_screen: dict[str, set[str]] = {}
         for entry in proven:
             if entry.get("state"):
@@ -137,6 +150,7 @@ def _screen_pages(
                     "assert_failed": status == "fail",
                     "reached_via_trace": bool(screen_reached and not reached),
                     **({"states": sorted(states_by_screen[screen])} if states_by_screen.get(screen) else {}),
+                    **({"data": fingerprint[screen]} if fingerprint.get(screen) else {}),
                 },
             )
             pages[screen] = page
@@ -269,6 +283,43 @@ def _add_edges(graph: PageGraph, payload: dict[str, Any], pages: dict[str, Page]
                      action=f"flow:{flow.get('id')}", source="flow-order")
             )
     return mode
+
+
+NOISE_TOKENS = (
+    "clockstatus", "livemetaba", "livecapsule", "statusbarbridge", "windowscene", "__common__",
+)
+
+
+def _usable(token: str) -> bool:
+    low = token.lower()
+    return len(low) >= 3 and not any(noise in low for noise in NOISE_TOKENS)
+
+
+def suggest_assertions(payload: dict[str, Any], *, limit: int = 4) -> dict[str, list[str]]:
+    """Labels that appear on one screen and not on the previous one.
+
+    Those are the only assertions that can prove arrival: anything already visible before the tap
+    is satisfied by the screen we never left (that is how a green run hid a dead route here).
+    """
+    out: dict[str, list[str]] = {}
+    for flow in payload.get("flows") or []:
+        prev: set[str] | None = None
+        for entry in flow.get("trace") or []:
+            if not isinstance(entry, dict):
+                continue
+            screen, sig = entry.get("screen"), str(entry.get("sig") or "")
+            if not screen or not sig:
+                continue
+            tokens = {t for t in sig.split("|") if _usable(t)}
+            if prev is not None:
+                fresh = sorted(tokens - prev)[:limit]
+                if fresh:
+                    bucket = out.setdefault(str(screen).strip(), [])
+                    for token in fresh:
+                        if token not in bucket:
+                            bucket.append(token)
+            prev = tokens
+    return out
 
 
 def flows_summary(payload: dict[str, Any]) -> str:

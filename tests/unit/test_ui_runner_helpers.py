@@ -106,3 +106,11 @@ def test_screen_state_has_is_substring_and_case_insensitive() -> None:
     st = ur.ScreenState(labels=["My Garden", "Add plant"])
     assert st.has("garden") and st.has("PLANT")
     assert not st.has("compost")
+
+
+def test_system_chrome_is_filtered_out_of_the_signature() -> None:
+    assert ur.is_system_noise("LiveMetaBallBaseVm", "metaballNode")
+    assert ur.is_system_noise("ClockStatusView")
+    assert ur.is_system_noise("__Common__")
+    assert not ur.is_system_noise("Plant list", "Text")
+    assert not ur.is_system_noise("Watering needs")

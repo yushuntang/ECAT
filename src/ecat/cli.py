@@ -677,6 +677,31 @@ def uiflow_discover(
     )
 
 
+@uiflow_app.command("suggest-assertions")
+def uiflow_suggest_assertions(
+    report: Annotated[Path, typer.Option("--report", help="T2 ui_runner report")],
+    out: Annotated[Path, typer.Option("--out", help="suggestions JSON")] = Path(
+        "reports/ui-flow/assertion-suggestions.json"
+    ),
+) -> None:
+    """从报告里挑出“只在这一屏出现”的标签，作为能证明到达的断言。"""
+    from ecat.uiflow.flows_report import suggest_assertions
+
+    if not report.exists():
+        console.print(f"[red]report not found: {report}[/red]")
+        raise typer.Exit(1)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    suggestions = suggest_assertions(payload)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(suggestions, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not suggestions:
+        console.print("[yellow]no discriminating labels found (same signature on every screen?)[/yellow]")
+        raise typer.Exit(0)
+    for screen, labels in suggestions.items():
+        console.print(f"  {screen}: " + ", ".join(f'"{lab}"' for lab in labels))
+    console.print(f"[green]suggestions -> {out}[/green]")
+
+
 @uiflow_app.command("audit-discovery")
 def uiflow_audit_discovery(
     graph: Annotated[Path, typer.Option("--graph", help="layer B graph (discovery output)")],

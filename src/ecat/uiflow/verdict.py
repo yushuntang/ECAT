@@ -26,6 +26,35 @@ PASS, FAIL, BLOCKED = "PASS", "FAIL", "BLOCKED"
 EXIT = {PASS: 0, FAIL: 1, BLOCKED: 4, "ERROR": 2}
 
 
+def _text_count(label: str) -> int:
+    """How many visible strings a discovery label carries: `Act[$x] "A/B"` -> 2."""
+    body = label.split('"', 1)[-1].rstrip('"') if '"' in label else ""
+    return len([part for part in body.split("/") if part.strip()]) or 1
+
+
+def classify_missing(result: Any, known_screens: set[str]) -> list[dict[str, str]]:
+    """Why a spec row is missing, and what to do about it.
+
+    "Missing" used to be one bucket, which sent people to the wrong place: a page the port ships
+    but nothing navigates to is an entry bug, a page the port lacks is a port bug, and a screen that
+    simply showed less content is a data problem.
+    """
+    rows: list[dict[str, str]] = []
+    for row in result.missing:
+        declared = str(row.port_page or "")
+        stem = declared.replace("\\", "/").rsplit("/", 1)[-1]
+        if stem.endswith(".ets"):
+            stem = stem[: -len(".ets")]
+        if stem and stem not in known_screens:
+            action, kind = "补这一页，或确认它是否该存在", "missing_page"
+        elif stem:
+            action, kind = "页面在端口里，但没有 flow 证明能到——查入口/路由", "entry_broken"
+        else:
+            action, kind = "spec 这一行没填 port.screen", "unmapped"
+        rows.append({"screen": row.screen, "kind": kind, "action": action})
+    return rows
+
+
 @dataclass
 class Check:
     name: str
@@ -47,6 +76,8 @@ class Verdict:
     reasons: list[str] = field(default_factory=list)
     dead_pages: list[str] = field(default_factory=list)
     missing_pages: list[str] = field(default_factory=list)
+    #: per missing page: why it is missing and what to do (`missing_page` / `entry_broken` / `unmapped`)
+    missing_detail: list[dict[str, str]] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
     #: what changed since the previous run of this bundle (None = history disabled)
     history: dict[str, Any] | None = None
@@ -68,6 +99,7 @@ class Verdict:
             "reasons": self.reasons,
             "dead_pages": self.dead_pages,
             "missing_pages": self.missing_pages,
+            "missing_detail": self.missing_detail,
             "artifacts": self.artifacts,
             "history": self.history,
         }
@@ -99,7 +131,12 @@ class Verdict:
             lines += [f"- {r}" for r in self.reasons]
         if self.missing_pages:
             lines += ["", f"## 缺失页（{len(self.missing_pages)}）"]
-            lines += [f"- `{p}`" for p in self.missing_pages]
+            if self.missing_detail:
+                lines += ["", "| 页 | 类型 | 下一步 |", "|---|---|---|"]
+                for row in self.missing_detail:
+                    lines.append(f"| `{row['screen']}` | {row['kind']} | {row['action']} |")
+            else:
+                lines += [f"- `{p}`" for p in self.missing_pages]
         if self.dead_pages:
             lines += ["", f"## 死页（注册但用户到不了，{len(self.dead_pages)}）"]
             lines += [f"- `{p}`" for p in self.dead_pages]
@@ -160,6 +197,7 @@ def _build_verdict(
     from ecat.uiflow.spec import UiflowSpec, diff_against_spec
 
     verdict = Verdict(bundle=bundle, generated=time.strftime("%Y-%m-%d %H:%M:%S"))
+    known_screens: set[str] = set()
     report_payload = json.loads(Path(port_report).read_text(encoding="utf-8"))
 
     # which app was actually measured, if the runner said so
@@ -182,6 +220,7 @@ def _build_verdict(
         errors = [f for f in pc.findings if f.severity == "error"]
         orphan = [f.screen for f in pc.findings if f.check == "orphan_page"]
         verdict.dead_pages = orphan
+        known_screens = pc.pages.known_screens
         verdict.checks.append(Check(
             "port-check", "fail" if errors else "pass",
             "; ".join(f.detail for f in errors) or
@@ -260,6 +299,7 @@ def _build_verdict(
         "unconfirmed_spec_rows": len(unconfirmed),
     }
     verdict.missing_pages = [r.screen for r in result.missing]
+    verdict.missing_detail = classify_missing(result, known_screens)
     state_fn = result.state_fn_rate
     if state_fn is None:
         verdict.checks.append(Check("state-coverage", "skip", "spec 没声明任何状态（tab/筛选/面板）"))

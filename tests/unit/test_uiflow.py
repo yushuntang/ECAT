@@ -205,6 +205,41 @@ def test_state_evidence_survives_the_importer_merge() -> None:
     assert page.extra["states"] == ["my_garden", "plant_list"], "states from both flows are unioned"
 
 
+# ── suggestions, data fingerprints, and why a page is missing ───────────────
+def test_suggest_assertions_returns_only_labels_new_on_this_screen() -> None:
+    from ecat.uiflow.flows_report import suggest_assertions
+
+    payload = _flows_report({"id": "f", "status": "pass", "screens": ["A.ets", "B.ets"], "trace": [
+        {"step": 0, "action": "launch", "screen": "A.ets", "sig": "apple|beet"},
+        {"step": 1, "action": "tap(Beet)", "screen": "B.ets", "sig": "apple|watering needs|every 30 days"},
+    ]})
+    out = suggest_assertions(payload)
+    assert "apple" not in out.get("B.ets", []), "apple was already on the previous screen"
+    assert "watering needs" in out["B.ets"]
+
+
+def test_pages_carry_a_data_fingerprint() -> None:
+    from ecat.uiflow.flows_report import graph_from_flows_report
+
+    g = graph_from_flows_report(_flows_report({"id": "f", "status": "pass", "screens": ["A.ets"],
+        "trace": [{"step": 0, "action": "launch", "screen": "A.ets", "sig": "a|b|c"}]}))
+    page = next(p for p in g.pages if p.label == "A.ets")
+    assert page.extra["data"]["labels"] == 3
+
+
+def test_missing_pages_are_classified_by_what_is_actually_wrong() -> None:
+    from ecat.uiflow.spec import SpecDiffResult, SpecRow
+    from ecat.uiflow.verdict import classify_missing
+
+    result = SpecDiffResult(rows=[
+        SpecRow(screen="gone", android_reached=True, port_present=False, port_page="Ghost.ets"),
+        SpecRow(screen="stuck", android_reached=True, port_present=False, port_page="Known.ets"),
+        SpecRow(screen="blank", android_reached=True, port_present=False, port_page=""),
+    ])
+    kinds = {row["screen"]: row["kind"] for row in classify_missing(result, {"Known"})}
+    assert kinds == {"gone": "missing_page", "stuck": "entry_broken", "blank": "unmapped"}
+
+
 # ── a weak assertion is not evidence of arrival ─────────────────────────────
 def test_weak_assertion_does_not_credit_the_screen() -> None:
     """The label was already on the previous screen: presence proves nothing about navigation."""
