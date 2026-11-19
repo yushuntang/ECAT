@@ -194,6 +194,7 @@ def run_droidbot(
     timeout: int = 300,
     tries: int = 3,
     extra_args: tuple[str, ...] = (),
+    start_activity: str = "",
     log: Any = None,
     adb: Adb | None = None,
 ) -> DroidBotRun:
@@ -230,6 +231,7 @@ def run_droidbot(
             "-grant_perm",
             "-is_emulator",
             "-keep_app",
+            *(["-start_activity", start_activity] if start_activity else []),
             *extra_args,
         ]
         if log:

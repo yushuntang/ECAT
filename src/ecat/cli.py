@@ -581,6 +581,10 @@ def uiflow_discover(
         "reports/ui-flow/baselines"
     ),
     refresh: Annotated[bool, typer.Option("--refresh", help="explore again even if a baseline exists for this build")] = False,
+    start_activity: Annotated[
+        str,
+        typer.Option("--start-activity", help="seed exploration on this activity (guided coverage of a page the entry never reaches)"),
+    ] = "",
     allow_sha_mismatch: Annotated[
         bool, typer.Option("--allow-sha-mismatch", help="accept a UTG that was explored from another APK build")
     ] = False,
@@ -646,6 +650,7 @@ def uiflow_discover(
                     count=count,
                     timeout=timeout,
                     tries=tries,
+                    start_activity=start_activity,
                     log=lambda m: console.print(m, markup=False, highlight=False),
                 )
                 framework, out_dir, mode = run.framework, str(run.out_dir), "captured"
@@ -738,6 +743,70 @@ def uiflow_audit_discovery(
         console.print(
             "[yellow]分母可能偏小：FN 会因此偏低。加大 --count/--timeout 或把这些页补进探索路径。[/yellow]"
         )
+
+
+@uiflow_app.command("cover-gaps")
+def uiflow_cover_gaps(
+    apk: Annotated[Path, typer.Option("--apk", "-a", help="original APK")],
+    graph: Annotated[Path, typer.Option("--graph", help="current layer-B graph to extend")],
+    out: Annotated[Path, typer.Option("--out", help="merged graph JSON")] = Path(
+        "reports/ui-flow/table-B-covered.json"
+    ),
+    serial: Annotated[str, typer.Option("--serial", help="adb serial")] = "emulator-5630",
+    targets: Annotated[int, typer.Option("--targets", help="how many uncovered activities to seed")] = 4,
+    count: Annotated[int, typer.Option("--count", help="events per seeded round")] = 30,
+    timeout: Annotated[int, typer.Option("--timeout", help="seconds per seeded round")] = 180,
+    home: Annotated[str, typer.Option("--droidbot-home")] = "",
+    python: Annotated[str, typer.Option("--droidbot-python")] = "",
+) -> None:
+    """用 A 的清单给 B 补探：对未覆盖的 activity 逐条 seed 一轮探索，再合并进分母。"""
+    from ecat.uiflow.discover import activity_coverage, merge_graphs, run_droidbot, summary_line
+    from ecat.uiflow.inventory import enumerate_activities
+    from ecat.uiflow.models import PageGraph
+
+    for label, path in (("apk", apk), ("graph", graph)):
+        if not path.exists():
+            console.print(f"[red]{label} not found: {path}[/red]")
+            raise typer.Exit(1)
+    pkg, acts = enumerate_activities(apk)
+    graphs = [PageGraph.load(graph)]
+    before = activity_coverage(graphs[0], acts, package=pkg)
+    console.print(
+        f"起点：{before['app_activities_seen']}/{before['app_activities_total']} "
+        f"({before['app_coverage']:.1%}) · 未覆盖 {len(before['never_reached'])}"
+    )
+
+    pending = [name for name in before["never_reached"] if name.startswith(pkg)][: max(targets, 0)]
+    for i, activity in enumerate(pending, 1):
+        console.print(f"  [{i}/{len(pending)}] seed on {activity.rsplit('.', 1)[-1]}")
+        try:
+            run = run_droidbot(
+                apk,
+                serial,
+                out.parent / f"seeded-{activity.rsplit('.', 1)[-1]}",
+                home=home or None,
+                python=python or None,
+                count=count,
+                timeout=timeout,
+                start_activity=activity,
+                log=lambda m: console.print(m, markup=False, highlight=False),
+            )
+        except Exception as exc:  # noqa: BLE001 - one dead seed must not end the sweep
+            console.print(f"[yellow]  seed failed: {exc}[/yellow]")
+            continue
+        from ecat.uiflow.discover import graph_from_utg
+
+        graphs.append(graph_from_utg(run.framework))
+        console.print(f"    {summary_line(run)}")
+
+    merged = merge_graphs(graphs)
+    path = merged.save(out)
+    after = activity_coverage(merged, acts, package=pkg)
+    console.print(
+        f"[green]{before['app_coverage']:.1%} -> {after['app_coverage']:.1%}[/green] "
+        f"({after['app_activities_seen']}/{after['app_activities_total']}) · "
+        f"pages={len(merged.pages)} edges={len(merged.edges)} -> {path}"
+    )
 
 
 @uiflow_app.command("merge-graphs")
