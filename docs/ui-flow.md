@@ -385,6 +385,25 @@ The denominator is that page set, so a thin sample makes FN look good for the wr
     ecat uiflow merge-graphs reports/ui-flow/B-*.json --apk app.apk \
         --out reports/ui-flow/table-B.json
 
+**Measured plateau (gallery, emulator-5630).** Three rounds with different policies and larger
+budgets, unioned:
+
+| rounds | pages | edges | own activities covered |
+|---|---|---|---|
+| 1 × count 25 | 5 | 14 | 2/18 (11.1%) |
+| + count 120 | 11 | 28 | 3/18 (16.7%) |
+| + dfs_greedy count 90 | 13 | 46 | 3/18 (16.7%) |
+
+More pages and edges, no new activity: the remaining 15 sit behind entry points that random label
+clicks never find (an icon-only Settings gear, hidden/excluded folders). Seeding a round on a
+specific activity was tried four times and never captured the target state (see the commit record);
+the accessibility adapter re-foregrounds the app after `am start`, so the seeded screen is replaced
+before it is captured.
+
+Consequence for the acceptance number: on an app of this shape, blind exploration gives a denominator
+that covers three activities, and FN is only meaningful over those three. Raising it needs either a
+curated entry map (human taps, which this project wants to avoid) or a working seed — not more rounds.
+
 `merge-graphs` keys pages by the content-free structure (`structure:<hash>`), so the same layout
 showing different rows stays one page, and unions edges by `(src, dst, action)`. `--apk` reports the
 resulting coverage, and `--out` is what `uiflow report --base` should point at.
