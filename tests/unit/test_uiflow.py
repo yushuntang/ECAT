@@ -458,6 +458,19 @@ def test_ambiguous_state_texts_are_reported(tmp_path) -> None:
     assert "state_ambiguous" in checks
 
 
+def test_droidbot_cmd_carries_the_seed_activity_only_when_asked(tmp_path) -> None:
+    from ecat.uiflow.discover import droidbot_cmd
+
+    apk, out = tmp_path / "a.apk", tmp_path / "out"
+    plain = droidbot_cmd("python", apk, out, "emulator-5630")
+    assert "-start_activity" not in plain, "blind rounds must not carry a seed"
+
+    seeded = droidbot_cmd("python", apk, out, "emulator-5630", start_activity="com.x/.Settings")
+    idx = seeded.index("-start_activity")
+    assert seeded[idx + 1] == "com.x/.Settings"
+    assert seeded.count("-keep_app") == 1
+
+
 def test_merge_graphs_unions_pages_by_structure_and_edges_by_action() -> None:
     from ecat.uiflow.discover import merge_graphs
     from ecat.uiflow.models import Edge, Page, PageGraph

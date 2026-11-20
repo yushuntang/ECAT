@@ -182,6 +182,42 @@ def _preflight(adb: Adb) -> None:
 
 
 # ── running ───────────────────────────────────────────────────────────────────
+def droidbot_cmd(
+    interpreter: str,
+    apk: Path,
+    out_dir: Path,
+    serial: str,
+    *,
+    policy: str = "bfs_greedy",
+    count: int = 30,
+    timeout: int = 300,
+    start_activity: str = "",
+    extra_args: tuple[str, ...] = (),
+) -> list[str]:
+    """The DroidBot command line, isolated so the flag plumbing can be tested without a device."""
+    return [
+        interpreter,
+        "start.py",
+        "-a",
+        str(apk.resolve()),
+        "-o",
+        str(out_dir.resolve()),
+        "-d",
+        serial,
+        "-policy",
+        policy,
+        "-count",
+        str(count),
+        "-timeout",
+        str(timeout),
+        "-grant_perm",
+        "-is_emulator",
+        "-keep_app",
+        *(["-start_activity", start_activity] if start_activity else []),
+        *extra_args,
+    ]
+
+
 def run_droidbot(
     apk: Path,
     serial: str,
@@ -213,27 +249,8 @@ def run_droidbot(
     for attempt in range(1, tries + 1):
         if out_dir.exists():
             shutil.rmtree(out_dir)
-        cmd = [
-            interpreter,
-            "start.py",
-            "-a",
-            str(apk.resolve()),
-            "-o",
-            str(out_dir.resolve()),
-            "-d",
-            serial,
-            "-policy",
-            policy,
-            "-count",
-            str(count),
-            "-timeout",
-            str(timeout),
-            "-grant_perm",
-            "-is_emulator",
-            "-keep_app",
-            *(["-start_activity", start_activity] if start_activity else []),
-            *extra_args,
-        ]
+        cmd = droidbot_cmd(interpreter, apk, out_dir, serial, policy=policy, count=count,
+                           timeout=timeout, start_activity=start_activity, extra_args=extra_args)
         if log:
             log(f"[discover] attempt {attempt}/{tries}: {' '.join(cmd[1:6])} …")
         try:
