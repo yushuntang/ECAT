@@ -427,6 +427,21 @@ Measured on this project: the gallery exploration reached **2 of 18** of the app
 (`android.widget.FrameLayout` and `Column` are both containers) and dropping containers/scrollers,
 whose counts only reflect how many layout nodes each platform's dump emits.
 
+Position-aware variant (element role + a 3×3 position bucket, `geometry` in the page extra). Measured
+on the same pair, it scores the *correct* pairing at **0.10** — worse than the role mix it replaced.
+
+The reason is not the metric, it is the two dump sources:
+
+| side | what a dump exposes |
+|---|---|
+| Android (DroidBot accessibility) | the full view hierarchy — 43 views on one dialog, containers included |
+| ArkUI (`uitest dumpLayout`) | only nodes carrying text/description — 5 elements on the same dialog |
+
+So a set-overlap score is dominated by *how many nodes each platform exposes*, not by the screen. Until
+the OH dump exposes structure (or the comparison moves to screenshots / T3), element-level coverage
+across platforms is not measurable. The code stays (it is honest about `no-structure-data`), but it is
+not a gate and should not be quoted as one.
+
 Real data, gallery port vs gallery APK:
 
 | pairing | score | verdict |

@@ -267,6 +267,38 @@ def test_cosine_says_nothing_when_a_side_has_no_types() -> None:
     assert cosine({"Text": 1}, {}) is None
 
 
+def test_position_slots_tell_a_grid_from_a_single_button() -> None:
+    from ecat.uiflow.structure import jaccard, slots
+
+    grid = {"size": [300, 300],
+            "elements": [["ImageView", 20, 20], ["ImageView", 280, 20],
+                         ["ImageView", 20, 280], ["ImageView", 280, 280]]}
+    dialog = {"size": [300, 300], "elements": [["Button", 150, 260]]}
+    assert len(slots(grid)) == 4 and len(slots(dialog)) == 1
+    assert jaccard(slots(grid), slots(dialog)) == 0.0, "a 2x2 grid is not a centred button"
+    assert jaccard(slots(grid), slots(grid)) == 1.0
+
+
+def test_compare_prefers_geometry_over_role_counts() -> None:
+    from ecat.uiflow.models import Page, PageGraph
+    from ecat.uiflow.spec import SpecDiffResult, SpecRow
+    from ecat.uiflow.structure import compare_screens
+
+    base = PageGraph(side="android", method="click")
+    base.pages = [Page(key="1", label="Media", component="c", extra={
+        "types": {"ImageView": 4, "Text": 1},
+        "geometry": {"size": [300, 300], "elements": [["ImageView", 20, 20], ["ImageView", 280, 20],
+                                                      ["ImageView", 20, 280], ["ImageView", 280, 280]]}})]
+    port = PageGraph(side="oh", method="gate")
+    port.pages = [Page(key="2", label="Main.ets", component="c", extra={
+        "types": {"Text": 4, "Button": 1},
+        "geometry": {"size": [300, 300], "elements": [["Button", 150, 260]]}})]
+    result = SpecDiffResult(rows=[SpecRow(screen="media", android_reached=True, port_present=True,
+                                          android_page="Media", port_page="Main.ets")])
+    row = compare_screens(result, base, port)[0]
+    assert row["basis"] == "geometry" and row["verdict"] == "suspicious"
+
+
 def test_compare_screens_flags_a_pairing_that_does_not_look_alike() -> None:
     from ecat.uiflow.models import Page, PageGraph
     from ecat.uiflow.spec import SpecDiffResult, SpecRow

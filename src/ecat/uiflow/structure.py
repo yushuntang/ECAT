@@ -98,6 +98,36 @@ def cosine(a: dict[str, Any] | None, b: dict[str, Any] | None) -> float | None:
     return round(dot / norm, 4) if norm else None
 
 
+def slots(geometry: dict[str, Any] | None, *, grid: int = 3) -> set[str]:
+    """`role@rowcol` for each element, e.g. `image@11`. Position is what makes a grid of thumbnails
+    different from one big picture — the thing role counts alone could not tell apart."""
+    if not isinstance(geometry, dict):
+        return set()
+    size = geometry.get("size") or []
+    elements = geometry.get("elements") or []
+    if len(size) != 2 or not elements:
+        return set()
+    width, height = float(size[0] or 0), float(size[1] or 0)
+    if width <= 0 or height <= 0:
+        return set()
+    out: set[str] = set()
+    for element in elements:
+        if not isinstance(element, (list, tuple)) or len(element) < 3:
+            continue
+        role = canonical_type(str(element[0]))
+        x, y = float(element[1]), float(element[2])
+        row = min(grid - 1, max(0, int(grid * y / height)))
+        col = min(grid - 1, max(0, int(grid * x / width)))
+        out.add(f"{role}@{row}{col}")
+    return out
+
+
+def jaccard(a: set[str], b: set[str]) -> float | None:
+    if not a or not b:
+        return None
+    return round(len(a & b) / len(a | b), 4)
+
+
 def compare_screens(
     result: Any, base_graph: Any, port_graph: Any, *, suspicious: float = SUSPICIOUS
 ) -> list[dict[str, Any]]:
@@ -110,13 +140,17 @@ def compare_screens(
             continue
         base_page = base_by_label.get(row.android_page)
         port_page = port_by_label.get(row.port_page)
-        score = cosine(
-            (getattr(base_page, "extra", {}) or {}).get("types") if base_page else None,
-            (getattr(port_page, "extra", {}) or {}).get("types") if port_page else None,
-        )
+        base_extra = (getattr(base_page, "extra", {}) or {}) if base_page else {}
+        port_extra = (getattr(port_page, "extra", {}) or {}) if port_page else {}
+        score = jaccard(slots(base_extra.get("geometry")), slots(port_extra.get("geometry")))
+        basis = "geometry"
+        if score is None:
+            score = cosine(base_extra.get("types"), port_extra.get("types"))
+            basis = "roles"
         rows.append({
             "screen": row.screen,
             "similarity": score,
+            "basis": basis if score is not None else "",
             "verdict": (
                 "no-structure-data" if score is None
                 else "suspicious" if score < suspicious

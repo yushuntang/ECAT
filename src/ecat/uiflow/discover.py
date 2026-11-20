@@ -469,6 +469,57 @@ def visible_texts(node: dict[str, Any]) -> list[str]:
     return out
 
 
+def _bounds_center(bounds: Any) -> tuple[int, int] | None:
+    """Centre of a view's bounds — DroidBot stores `[[x1,y1],[x2,y2]]`, uitest uses "[x1,y1][x2,y2]"."""
+    if isinstance(bounds, (list, tuple)) and len(bounds) >= 2:
+        try:
+            (x1, y1), (x2, y2) = bounds[0], bounds[1]
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(bounds, str):
+        import re as _re
+
+        nums = _re.findall(r"-?\d+", bounds)
+        if len(nums) < 4:
+            return None
+        x1, y1, x2, y2 = (int(n) for n in nums[:4])
+    else:
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1 + x2) // 2, (y1 + y2) // 2
+
+
+def state_geometry(run_dir: Path | str) -> dict[str, dict[str, Any]]:
+    """`state_str -> {size: [w,h], elements: [[class, x, y], …]}` from a DroidBot run."""
+    states_dir = Path(run_dir) / "states"
+    out: dict[str, dict[str, Any]] = {}
+    if not states_dir.is_dir():
+        return out
+    for path in sorted(states_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        state = str(payload.get("state_str") or "")
+        views = payload.get("views") or []
+        width, height = payload.get("width"), payload.get("height")
+        if not state or not isinstance(views, list) or not width or not height:
+            continue
+        elements: list[list[Any]] = []
+        for view in views:
+            if not isinstance(view, dict) or view.get("visible") is False:
+                continue
+            centre = _bounds_center(view.get("bounds"))
+            name = str(view.get("class") or "").rsplit(".", 1)[-1].strip()
+            if centre and name:
+                elements.append([name, centre[0], centre[1]])
+        if elements:
+            out[state] = {"size": [int(width), int(height)], "elements": elements[:80]}
+    return out
+
+
 def state_type_histograms(run_dir: Path | str) -> dict[str, dict[str, int]]:
     """`state_str -> {component class: count}` from a DroidBot run's saved states.
 
@@ -506,6 +557,7 @@ def graph_from_utg(
     *,
     include_external: bool = False,
     types_by_state: dict[str, dict[str, int]] | None = None,
+    geometry_by_state: dict[str, dict[str, Any]] | None = None,
 ) -> PageGraph:
     """UTG -> PageGraph. States outside the app under test are dropped by default.
 
@@ -567,6 +619,11 @@ def graph_from_utg(
                     **(
                         {"types": (types_by_state or {})[str(node.get("state_str"))]}
                         if (types_by_state or {}).get(str(node.get("state_str")))
+                        else {}
+                    ),
+                    **(
+                        {"geometry": (geometry_by_state or {})[str(node.get("state_str"))]}
+                        if (geometry_by_state or {}).get(str(node.get("state_str")))
                         else {}
                     ),
                 },

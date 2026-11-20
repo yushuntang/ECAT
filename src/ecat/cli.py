@@ -662,13 +662,14 @@ def uiflow_discover(
             if utg_path.is_file():
                 stored = store_baseline(utg_path, baseline_dir, sha)
                 console.print(f"[dim]baseline pinned: {stored}[/dim]")
-        from ecat.uiflow.discover import state_type_histograms
+        from ecat.uiflow.discover import state_geometry, state_type_histograms
 
         run_dir = Path(out_dir) if out_dir else (Path(from_utg).parent if from_utg else Path("."))
         graph = graph_from_utg(
             framework,
             include_external=include_external,
             types_by_state=state_type_histograms(run_dir),
+            geometry_by_state=state_geometry(run_dir),
         )
     except DroidBotError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -801,10 +802,14 @@ def uiflow_cover_gaps(
         except Exception as exc:  # noqa: BLE001 - one dead seed must not end the sweep
             console.print(f"[yellow]  seed failed: {exc}[/yellow]")
             continue
-        from ecat.uiflow.discover import graph_from_utg, state_type_histograms
+        from ecat.uiflow.discover import graph_from_utg, state_geometry, state_type_histograms
 
         graphs.append(
-            graph_from_utg(run.framework, types_by_state=state_type_histograms(run.out_dir))
+            graph_from_utg(
+                run.framework,
+                types_by_state=state_type_histograms(run.out_dir),
+                geometry_by_state=state_geometry(run.out_dir),
+            )
         )
         console.print(f"    {summary_line(run)}")
 

@@ -79,9 +79,17 @@ def _screen_pages(
         # Data fingerprint: how much content this screen actually showed. A port with an empty
         # device and an Android side full of rows look identical at page level, and then FN
         # blames the port for missing pages it never had data to render.
+        elements_by_screen: dict[str, dict[str, Any]] = {}
         type_hist: dict[str, dict[str, int]] = {}
         for entry in proven:
             types = entry.get("types")
+            size = entry.get("screen_size")
+            elems = entry.get("elements")
+            if isinstance(size, list) and len(size) == 2 and isinstance(elems, list) and elems:
+                elements_by_screen[str(entry["screen"]).strip()] = {
+                    "size": size,
+                    "elements": elems,
+                }
             if isinstance(types, dict) and types:
                 bucket = type_hist.setdefault(str(entry["screen"]).strip(), {})
                 for name, count in types.items():
@@ -161,6 +169,7 @@ def _screen_pages(
                     **({"states": sorted(states_by_screen[screen])} if states_by_screen.get(screen) else {}),
                     **({"data": fingerprint[screen]} if fingerprint.get(screen) else {}),
                     **({"types": type_hist[screen]} if type_hist.get(screen) else {}),
+                    **({"geometry": elements_by_screen[screen]} if elements_by_screen.get(screen) else {}),
                 },
             )
             pages[screen] = page
