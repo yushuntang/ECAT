@@ -809,6 +809,38 @@ def uiflow_cover_gaps(
     )
 
 
+@uiflow_app.command("compare-structure")
+def uiflow_compare_structure(
+    base: Annotated[Path, typer.Option("--base", help="layer B graph")],
+    port: Annotated[Path, typer.Option("--port", help="layer C graph")],
+    spec: Annotated[Path, typer.Option("--spec", help="spec file (the pairing to check)")],
+    out: Annotated[Path, typer.Option("--out", help="comparison JSON (a .md sits next to it)")] = Path(
+        "reports/ui-flow/structure-compare.json"
+    ),
+) -> None:
+    """按元素类型直方图核对 spec 的配对是否合理（只提示，不改页面身份）。"""
+    from ecat.uiflow.models import PageGraph
+    from ecat.uiflow.spec import UiflowSpec, diff_against_spec
+    from ecat.uiflow.structure import compare_screens, to_markdown
+
+    for label, path in (("base", base), ("port", port), ("spec", spec)):
+        if not path.exists():
+            console.print(f"[red]{label} not found: {path}[/red]")
+            raise typer.Exit(1)
+    base_graph, port_graph = PageGraph.load(base), PageGraph.load(port)
+    result = diff_against_spec(base_graph, port_graph, UiflowSpec.load(spec))
+    rows = compare_screens(result, base_graph, port_graph)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"rows": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
+    out.with_suffix(".md").write_text(to_markdown(rows), encoding="utf-8")
+    for row in rows:
+        score = "—" if row["similarity"] is None else f"{row['similarity']:.2f}"
+        colour = {"plausible": "green", "suspicious": "red"}.get(row["verdict"], "dim")
+        console.print(f"  [{colour}]{row['verdict']:16s}[/{colour}] {row['screen']:24s} {score}")
+    console.print(f"[green]compare -> {out}[/green] (+ .md)")
+
+
 @uiflow_app.command("merge-graphs")
 def uiflow_merge_graphs(
     graphs: Annotated[list[Path], typer.Argument(help="B graphs to union (2 or more)")],

@@ -205,6 +205,57 @@ def test_state_evidence_survives_the_importer_merge() -> None:
     assert page.extra["states"] == ["my_garden", "plant_list"], "states from both flows are unioned"
 
 
+# ── structure: types, not text, are comparable across platforms ─────────────
+def test_cosine_compares_type_histograms_not_sizes() -> None:
+    from ecat.uiflow.structure import cosine
+
+    small = {"Text": 3, "Button": 1}
+    big = {"Text": 30, "Button": 10}          # same shape, ten times the content
+    other = {"Image": 8}
+    assert cosine(small, big) == 1.0, "normalisation must ignore screen size"
+    assert cosine(small, other) == 0.0
+    # proportions matter, counts do not: swapping 3:1 into 1:3 must drop the score clearly
+    assert 0.5 <= cosine(small, {"Text": 1, "Button": 3}) < 0.7
+
+
+def test_cosine_says_nothing_when_a_side_has_no_types() -> None:
+    from ecat.uiflow.structure import cosine
+
+    assert cosine(None, {"Text": 1}) is None
+    assert cosine({"Text": 1}, {}) is None
+
+
+def test_compare_screens_flags_a_pairing_that_does_not_look_alike() -> None:
+    from ecat.uiflow.models import Page, PageGraph
+    from ecat.uiflow.spec import SpecDiffResult, SpecRow
+    from ecat.uiflow.structure import compare_screens
+
+    base = PageGraph(side="android", method="click")
+    base.pages = [Page(key="1", label="Media", component="c",
+                       extra={"types": {"Image": 20, "Text": 2}})]
+    port = PageGraph(side="oh", method="gate")
+    port.pages = [Page(key="2", label="Settings.ets", component="c",
+                       extra={"types": {"Switch": 9, "Text": 12}})]
+    result = SpecDiffResult(rows=[SpecRow(screen="media", android_reached=True, port_present=True,
+                                          android_page="Media", port_page="Settings.ets")])
+    rows = compare_screens(result, base, port)
+    assert rows[0]["verdict"] == "suspicious" and rows[0]["similarity"] < 0.55
+
+
+def test_compare_screens_reports_missing_data_instead_of_scoring_zero() -> None:
+    from ecat.uiflow.models import Page, PageGraph
+    from ecat.uiflow.spec import SpecDiffResult, SpecRow
+    from ecat.uiflow.structure import compare_screens
+
+    base = PageGraph(side="android", method="click")
+    base.pages = [Page(key="1", label="Media", component="c")]
+    port = PageGraph(side="oh", method="gate")
+    port.pages = [Page(key="2", label="Media.ets", component="c")]
+    result = SpecDiffResult(rows=[SpecRow(screen="media", android_reached=True, port_present=True,
+                                          android_page="Media", port_page="Media.ets")])
+    assert compare_screens(result, base, port)[0]["verdict"] == "no-structure-data"
+
+
 # ── suggestions, data fingerprints, and why a page is missing ───────────────
 def test_suggest_assertions_returns_only_labels_new_on_this_screen() -> None:
     from ecat.uiflow.flows_report import suggest_assertions
