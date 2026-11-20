@@ -420,6 +420,24 @@ pages it also ships (ExoPlayer, commons' License…), which are pages but not pr
 Measured on this project: the gallery exploration reached **2 of 18** of the app's own activities
 (11%) — i.e. the 30-event / 300-second default was the binding constraint, not the port.
 
+## 5f. Two entry points: the gate and the instrument
+
+The same measurement serves two jobs, and mixing them was a mistake worth naming:
+
+| | `scripts/uiflow_gate.sh` | `scripts/uiflow_diagnose.sh` |
+|---|---|---|
+| output | verdict (PASS/FAIL/BLOCKED) + FN | `work_list` (port defects) + `tooling` (measurement defects) |
+| exit | the verdict's code — CI reads it | 0 unless unmeasurable (`STRICT=1` to fail on defects) |
+| when | the denominator is trusted | now, while it is not |
+
+`work_list` entries carry `file`, `issues`, `severity` and an empty `verify`, so
+`scripts/uiflow_fix_verify.sh` consumes them unchanged: diagnose → refine → rebuild → **same flows** →
+verdict → history. Nothing in that loop rewrites the expectations after a failure.
+
+`tooling` is deliberately kept out of `work_list`: a weak assertion, a spec row without `port.screen`,
+or missing state evidence are faults of the measuring stick, and handing them to the port refinement
+loop would make the agent "fix" a screen that is fine.
+
 ## 5e. Structure comparison — measured, and not yet a gate
 
 `uiflow compare-structure --base --port --spec` scores each paired screen by the mix of component

@@ -18,62 +18,16 @@ set -uo pipefail
 : "${PORT_DIR:?PORT_DIR (harmony project) is required}"
 : "${BASE:?BASE (layer B graph) is required}"
 
-HAP="${HAP:-}"
-OUT_DIR="${OUT_DIR:-reports/ui-flow}"
-PY="${PY:-python}"
-RUNNER="${RUNNER:-tools/ui_runner.py}"
-ECAT="${ECAT:-ecat}"
+# shellcheck source=scripts/_uiflow_common.sh
+source "$(dirname "$0")/_uiflow_common.sh"
+uiflow_prepare
 
-# Everything below may run from a different working directory (the ecat CLI is often a wrapper),
-# so resolve inputs once, here.
-abspath() {
-  local p="$1"
-  case "$p" in
-    [A-Za-z]:[\\/]*) printf '%s\n' "${p//\\//}" ;;
-    *)
-      local full="$p"
-      case "$p" in
-        /*) ;;
-        *) full="$PWD/$p" ;;
-      esac
-      if command -v cygpath >/dev/null 2>&1; then
-        # git-bash: hand native tools a mixed path they can actually open
-        cygpath -m "$full"
-      else
-        printf '%s\n' "$full"
-      fi
-      ;;
-  esac
-}
-FLOWS=$(abspath "$FLOWS")
-SPEC=$(abspath "$SPEC")
-PORT_DIR=$(abspath "$PORT_DIR")
-BASE=$(abspath "$BASE")
-[[ -n "$HAP" ]] && HAP=$(abspath "$HAP")
-OUT_DIR=$(abspath "$OUT_DIR")
-REPORT_JSON="$OUT_DIR/port-report.json"
-C_JSON="$OUT_DIR/graph-C.json"
 VERDICT_JSON="$OUT_DIR/verdict.json"
 
-mkdir -p "$OUT_DIR"
-echo "== 1/3 flows on $DEVICE (bundle $BUNDLE) =="
-runner_args=(--flows "$FLOWS" --out "$REPORT_JSON" --bundle "$BUNDLE" --device "$DEVICE" --no-hypium)
-[[ -n "$HAP" ]] && runner_args+=(--hap "$HAP")
-# CHANGED="Garden.ets,PlantDetail.ets" runs only flows touching those screens
-[[ -n "${CHANGED:-}" ]] && runner_args+=(--changed "$CHANGED")
-"$PY" "$RUNNER" "${runner_args[@]}" > "$OUT_DIR/runner.log" 2>&1
-runner_rc=$?
-if [[ ! -f "$REPORT_JSON" ]]; then
-  echo "runner produced no report (exit $runner_rc) — see $OUT_DIR/runner.log" >&2
-  tail -20 "$OUT_DIR/runner.log" >&2
-  exit 2
-fi
+uiflow_run_flows || exit 2
+uiflow_import_graph || exit 2
 
-echo "== 2/3 port graph =="
-"$ECAT" uiflow import-flows --from "$REPORT_JSON" --bundle "$BUNDLE" --out "$C_JSON" \
-  || { echo "import-flows failed" >&2; exit 2; }
-
-echo "== 3/3 verdict =="
+echo "== verdict =="
 "$ECAT" uiflow report \
   --base "$BASE" \
   --port-report "$REPORT_JSON" \

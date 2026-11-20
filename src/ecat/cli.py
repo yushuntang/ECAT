@@ -823,6 +823,51 @@ def uiflow_cover_gaps(
     )
 
 
+@uiflow_app.command("diagnose")
+def uiflow_diagnose(
+    base: Annotated[Path, typer.Option("--base", help="layer B graph (what users can reach)")],
+    port_report: Annotated[Path, typer.Option("--port-report", help="T2 ui_runner report")],
+    spec: Annotated[Path, typer.Option("--spec", help="spec file (the join key)")],
+    out: Annotated[Path, typer.Option("--out", help="work items JSON (a .md sits next to it)")] = Path(
+        "reports/ui-flow/diagnosis.json"
+    ),
+    flows: Annotated[Path | None, typer.Option("--flows", help="flow spec, enables the flow audit")] = None,
+    port_dir: Annotated[Path | None, typer.Option("--port-dir", help="harmony project, enables port check")] = None,
+    bundle: Annotated[str, typer.Option("--bundle", help="bundle name")] = "",
+    strict: Annotated[bool, typer.Option("--strict", help="exit 1 when port defects were found")] = False,
+) -> None:
+    """把 uiflow 当缺陷发现器：跑一遍诊断，产出 ECAT 可吃的 work item（不判验收通过与否）。"""
+    from ecat.uiflow.verdict import build_verdict
+    from ecat.uiflow.workitems import save, to_work_items
+
+    for label, path in (("base", base), ("port-report", port_report), ("spec", spec)):
+        if not path.exists():
+            console.print(f"[red]{label} not found: {path}[/red]")
+            raise typer.Exit(2)
+    try:
+        verdict = build_verdict(base=base, port_report=port_report, spec=spec, flows=flows,
+                                port_dir=port_dir, bundle=bundle, history_dir=None)
+    except (ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]diagnosis failed: {exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    payload = to_work_items(verdict, port_dir=port_dir, spec=spec)
+    path = save(payload, out)
+    defects = payload.get("work_list") or []
+    tooling = payload.get("tooling") or []
+    for item in defects:
+        console.print(f"  [{'red' if item['severity'] == 'high' else 'yellow'}]{item['severity']:5s}[/] "
+                      f"{item['file']}")
+        console.print(f"        {item['issues'][0]}")
+    for item in tooling:
+        console.print(f"  [dim]tooling {item.get('screen')}: {item.get('issue')[:90]}[/dim]")
+    console.print(
+        f"[green]诊断：{len(defects)} 个端口缺陷 · {len(tooling)} 个测量问题 -> {path}[/green] (+ .md)"
+    )
+    if strict and defects:
+        raise typer.Exit(1)
+
+
 @uiflow_app.command("compare-structure")
 def uiflow_compare_structure(
     base: Annotated[Path, typer.Option("--base", help="layer B graph")],

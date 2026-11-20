@@ -420,7 +420,9 @@ generator:
 | `ecat uiflow history` | Per-bundle run history; `report` also prints the delta (regression/fixed/unchanged) |
 | `ecat uiflow spec-confirm` | Accept the auto-proposed screen pairings once a human has reviewed them |
 | state coverage | `states` in a spec row + `"state"` on flow steps → `state FN` for tabs/filters/panels inside a page |
+| `uiflow diagnose` | run the measurement and emit work items (`work_list` = port defects, `tooling` = bad measuring stick) |
 | `scripts/uiflow_gate.sh` | CI entry point: flows → C graph → verdict, exits with the verdict's code |
+| `scripts/uiflow_diagnose.sh` | discovery entry point: same measurement → work items today can be fixed, never fails the build unless unmeasurable |
 | `ecat uiflow audit-discovery` | Is B's denominator complete? Manifest activities vs discovered pages, app vs library |
 | `ecat uiflow suggest-assertions` | Which labels can prove arrival (present here, absent on the previous screen) |
 | `scripts/uiflow_fix_verify.sh` | work item → refine → build → same flows → verdict → history |

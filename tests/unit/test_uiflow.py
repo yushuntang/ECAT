@@ -231,6 +231,59 @@ def test_state_type_histograms_tolerates_a_missing_run_dir(tmp_path) -> None:
     assert state_type_histograms(tmp_path / "nope") == {}
 
 
+# ── diagnosis: portfolio of defects, not a pass/fail verdict ────────────────
+def _verdict(**over):
+    from ecat.uiflow.verdict import Verdict
+
+    v = Verdict(bundle="com.demo", generated="t", status="FAIL")
+    v.checks = over.get("checks") or []
+    v.missing_detail = over.get("missing_detail") or []
+    v.dead_pages = over.get("dead_pages") or []
+    v.reasons = over.get("reasons") or []
+    v.numbers = {"app": "com.demo v1"}
+    return v
+
+
+def test_a_missing_page_becomes_a_work_item_with_a_file() -> None:
+    from ecat.uiflow.workitems import to_work_items
+
+    payload = to_work_items(_verdict(missing_detail=[
+        {"screen": "settings", "kind": "missing_page", "action": "补这一页"}]), )
+    item = payload["work_list"][0]
+    assert item["severity"] == "high"
+    assert item["file"].endswith("entry/src/main/ets/pages/Settings.ets")
+    assert "端口没有这一页" in item["issues"][0]
+
+
+def test_a_broken_entry_is_not_reported_as_a_missing_page() -> None:
+    from ecat.uiflow.workitems import to_work_items
+
+    payload = to_work_items(_verdict(missing_detail=[
+        {"screen": "media", "kind": "entry_broken", "action": "查入口"}]))
+    item = payload["work_list"][0]
+    assert "页面存在但用户到不了" in item["issues"][0]
+
+
+def test_tooling_mistakes_are_kept_out_of_the_port_work_list() -> None:
+    from ecat.uiflow.verdict import Check
+    from ecat.uiflow.workitems import to_work_items
+
+    payload = to_work_items(_verdict(
+        missing_detail=[{"screen": "x", "kind": "unmapped", "action": "补 spec"}],
+        checks=[Check("flow-audit", "fail", "no_assertion")],
+    ))
+    assert payload["work_list"] == [], "a broken measuring stick is not a port defect"
+    assert {t["screen"] for t in payload["tooling"]} == {"x", "*"}
+
+
+def test_dead_pages_are_low_severity_cleanup() -> None:
+    from ecat.uiflow.workitems import to_markdown, to_work_items
+
+    payload = to_work_items(_verdict(dead_pages=["Index.ets"]))
+    assert payload["work_list"][0]["severity"] == "low"
+    assert "Index.ets" in to_markdown(payload)
+
+
 # ── structure: types, not text, are comparable across platforms ─────────────
 def test_types_are_bucketed_before_comparing() -> None:
     """The same dialog reads as FrameLayout/ScrollView on Android and Text/Button on ArkUI."""
