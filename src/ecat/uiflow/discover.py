@@ -469,7 +469,44 @@ def visible_texts(node: dict[str, Any]) -> list[str]:
     return out
 
 
-def graph_from_utg(framework: dict[str, Any], *, include_external: bool = False) -> PageGraph:
+def state_type_histograms(run_dir: Path | str) -> dict[str, dict[str, int]]:
+    """`state_str -> {component class: count}` from a DroidBot run's saved states.
+
+    The UTG only carries ids and hashes, so the component classes live here. Short class names
+    ("TextView", "Button") are used because the platforms name them differently at the prefix level
+    (android.widget.TextView vs Text) and any structural comparison has to survive that.
+    """
+    states_dir = Path(run_dir) / "states"
+    out: dict[str, dict[str, int]] = {}
+    if not states_dir.is_dir():
+        return out
+    for path in sorted(states_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        state = str(payload.get("state_str") or "")
+        views = payload.get("views") or []
+        if not state or not isinstance(views, list):
+            continue
+        counts: dict[str, int] = {}
+        for view in views:
+            if not isinstance(view, dict) or view.get("visible") is False:
+                continue
+            name = str(view.get("class") or "").rsplit(".", 1)[-1].strip()
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+        if counts:
+            out[state] = dict(sorted(counts.items(), key=lambda kv: -kv[1])[:12])
+    return out
+
+
+def graph_from_utg(
+    framework: dict[str, Any],
+    *,
+    include_external: bool = False,
+    types_by_state: dict[str, dict[str, int]] | None = None,
+) -> PageGraph:
     """UTG -> PageGraph. States outside the app under test are dropped by default.
 
     Page identity comes from the **visible texts** (`fingerprint_texts`), not from
@@ -527,6 +564,11 @@ def graph_from_utg(framework: dict[str, Any], *, include_external: bool = False)
                     "screenshot": node.get("image"),
                     "external": bool(app_package and package != app_package),
                     "texts": texts[:8],
+                    **(
+                        {"types": (types_by_state or {})[str(node.get("state_str"))]}
+                        if (types_by_state or {}).get(str(node.get("state_str")))
+                        else {}
+                    ),
                 },
             )
         )
@@ -546,7 +588,7 @@ def graph_from_utg(framework: dict[str, Any], *, include_external: bool = False)
 
 
 def summary_line(run: DroidBotRun) -> str:
-    g = graph_from_utg(run.framework)
+    g = graph_from_utg(run.framework, types_by_state=state_type_histograms(run.out_dir))
     fw = run.framework
     return (
         f"droidbot: {g.summary()['countable']} in-app page(s), {len(g.edges)} edge(s), "

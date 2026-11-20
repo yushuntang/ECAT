@@ -420,6 +420,25 @@ pages it also ships (ExoPlayer, commons' License…), which are pages but not pr
 Measured on this project: the gallery exploration reached **2 of 18** of the app's own activities
 (11%) — i.e. the 30-event / 300-second default was the binding constraint, not the port.
 
+## 5e. Structure comparison — measured, and not yet a gate
+
+`uiflow compare-structure --base --port --spec` scores each paired screen by the mix of component
+*roles* (text / button / image / input / list), after bucketing the platform-specific class names
+(`android.widget.FrameLayout` and `Column` are both containers) and dropping containers/scrollers,
+whose counts only reflect how many layout nodes each platform's dump emits.
+
+Real data, gallery port vs gallery APK:
+
+| pairing | score | verdict |
+|---|---|---|
+| Main empty state ↔ MainActivity.ets | 0.86 | plausible |
+| MediaActivity file list ↔ MainActivity.ets (**deliberately wrong**) | 0.86 | plausible |
+
+So it does **not** discriminate yet: with three role buckets, a file list and an empty dialog look
+alike. Keep it as a sanity check (gross mismatches still fall below 0.55), not as a pass/fail gate.
+Making it useful needs order/position (a row of N images is not the same as one big image) or
+per-row element counts — i.e. the element-level coverage work, not another threshold.
+
 ## 5d. What the report tells you to do, and when it cannot be trusted
 
 Four additions, all from failures that actually happened here:

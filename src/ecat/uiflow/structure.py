@@ -35,14 +35,52 @@ def histogram(types: dict[str, Any] | None) -> dict[str, float]:
     return {k: v / total for k, v in clean.items()} if total else {}
 
 
-def _counts(types: dict[str, Any] | None) -> dict[str, float]:
+#: The two platforms name the same idea differently (android.widget.FrameLayout vs Column), and the
+#: Android dump is container-heavy where the ArkUI dump is leaf-heavy. Comparing raw class names
+#: produced 0.04 for the *same* dialog on both sides, so types are bucketed first.
+TYPE_BUCKETS = (
+    ("text", ("textview", "text", "span", "label", "richtext")),
+    ("button", ("button", "toggle", "checkbox", "radio", "switch", "chip")),
+    ("image", ("imageview", "image", "icon", "symbolglyph", "avatar")),
+    ("input", ("edittext", "textinput", "textfield", "searchfield", "input")),
+    ("list", ("recyclerview", "listview", "gridview", "list", "grid", "table", "waterflow")),
+    ("scroll", ("scrollview", "scroll", "swiper", "pager", "viewpager")),
+    ("container", (
+        "layout", "viewgroup", "column", "row", "stack", "flex", "relative", "absolute",
+        "frame", "constraint", "container", "tabs", "navigation", "toolbar", "drawer",
+    )),
+)
+
+
+def canonical_type(name: str) -> str:
+    """`android.widget.FrameLayout` and `Column` are both containers; that is the comparable part."""
+    low = name.strip().lower().rsplit(".", 1)[-1]
+    for bucket, needles in TYPE_BUCKETS:
+        if any(needle in low for needle in needles):
+            return bucket
+    return "other"
+
+
+def _counts(types: dict[str, Any] | None, *, canonical: bool = True) -> dict[str, float]:
     if not isinstance(types, dict):
         return {}
-    return {
-        str(k).strip().lower(): float(v)
-        for k, v in types.items()
-        if isinstance(v, (int, float)) and v > 0 and str(k).strip()
-    }
+    out: dict[str, float] = {}
+    for key, value in types.items():
+        if not isinstance(value, (int, float)) or value <= 0 or not str(key).strip():
+            continue
+        name = canonical_type(str(key)) if canonical else str(key).strip().lower()
+        out[name] = out.get(name, 0.0) + float(value)
+    return out
+
+
+#: dropped before comparing when both sides still have something to say: container counts reflect
+#: how many layout nodes each platform's dump happens to emit, not what the screen offers
+LAYOUT_BUCKETS = {"container", "scroll"}
+
+
+def _roles(counts: dict[str, float]) -> dict[str, float]:
+    rest = {k: v for k, v in counts.items() if k not in LAYOUT_BUCKETS}
+    return rest or counts
 
 
 def cosine(a: dict[str, Any] | None, b: dict[str, Any] | None) -> float | None:
@@ -51,7 +89,7 @@ def cosine(a: dict[str, Any] | None, b: dict[str, Any] | None) -> float | None:
     Uses raw counts on purpose: cosine already ignores scale, so pre-normalising and then dividing
     by the magnitudes again inflates every score (3:1 vs 1:3 came out as 0.60 instead of 0.375).
     """
-    left, right = _counts(a), _counts(b)
+    left, right = _roles(_counts(a)), _roles(_counts(b))
     if not left or not right:
         return None
     keys = set(left) | set(right)

@@ -205,7 +205,49 @@ def test_state_evidence_survives_the_importer_merge() -> None:
     assert page.extra["states"] == ["my_garden", "plant_list"], "states from both flows are unioned"
 
 
+def test_state_type_histograms_read_a_droidbot_run(tmp_path) -> None:
+    from ecat.uiflow.discover import state_type_histograms
+
+    states = tmp_path / "states"
+    states.mkdir()
+    payload = {
+        "state_str": "abc123",
+        "views": [
+            {"class": "android.widget.TextView", "visible": True},
+            {"class": "android.widget.TextView", "visible": True},
+            {"class": "android.widget.Button", "visible": True},
+            {"class": "android.widget.Button", "visible": False},  # hidden: not part of the screen
+            {"class": "", "visible": True},
+        ],
+    }
+    (states / "state_1.json").write_text(json.dumps(payload), encoding="utf-8")
+    hist = state_type_histograms(tmp_path)
+    assert hist["abc123"] == {"TextView": 2, "Button": 1}
+
+
+def test_state_type_histograms_tolerates_a_missing_run_dir(tmp_path) -> None:
+    from ecat.uiflow.discover import state_type_histograms
+
+    assert state_type_histograms(tmp_path / "nope") == {}
+
+
 # ── structure: types, not text, are comparable across platforms ─────────────
+def test_types_are_bucketed_before_comparing() -> None:
+    """The same dialog reads as FrameLayout/ScrollView on Android and Text/Button on ArkUI."""
+    from ecat.uiflow.structure import canonical_type, cosine
+
+    assert canonical_type("android.widget.FrameLayout") == "container"
+    assert canonical_type("Column") == "container"
+    assert canonical_type("TextView") == "text"
+    assert canonical_type("Text") == "text"
+    assert canonical_type("androidx.recyclerview.widget.RecyclerView") == "list"
+    assert canonical_type("SymbolGlyph") == "image"
+
+    android_dialog = {"FrameLayout": 6, "LinearLayout": 2, "ScrollView": 2, "TextView": 1, "Button": 1}
+    port_dialog = {"Text": 4, "Button": 1}
+    assert cosine(android_dialog, port_dialog) > 0.7, "bucketed, these are the same shape"
+
+
 def test_cosine_compares_type_histograms_not_sizes() -> None:
     from ecat.uiflow.structure import cosine
 
